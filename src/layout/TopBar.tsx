@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { u } from '../tokens';
 import { Icon } from '../components/Icons';
-import { UpscaleLogoMark } from '../components/Logo';
+
 import { cn } from '@/lib/utils';
 import type { Program } from '../types';
 
@@ -30,7 +30,7 @@ export default function TopBar({ mob, sel, view, nav, prg, setSidebarOpen, setCm
       <div className="flex items-center justify-between px-3 md:px-6 h-14">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
           {mob && <button onClick={() => setSidebarOpen(true)} className="bg-transparent border-none cursor-pointer p-1"><Icon name="list" size={20} color="var(--foreground)" /></button>}
-          {!mob && <UpscaleLogoMark size={24} id="tb" />}
+          {!mob && <img src="/upscaleai-logo.svg" alt="UpscaleAI" width={24} height={24} className="dark:invert" />}
           {!mob && <div className="w-px h-5 bg-border" />}
           <motion.h1 key={sel || view} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="text-sm md:text-base font-bold tracking-tight truncate text-foreground">
             {sel ? prg.find(p => p.id === sel)?.name : nav.find(ni => ni.id === view)?.label}
@@ -39,7 +39,7 @@ export default function TopBar({ mob, sel, view, nav, prg, setSidebarOpen, setCm
         <div className="flex items-center gap-1.5 md:gap-2 flex-shrink-0">
           {!mob && <button onClick={() => setCmdOpen(true)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs bg-card border border-border text-muted-foreground cursor-pointer">
             <Icon name="search" size={13} color="var(--muted-foreground)" />Search...
-            <span className="font-mono px-1 rounded text-[9px] bg-border text-muted-foreground">&#8984;K</span>
+            <span className="font-mono px-1 rounded text-xs bg-border text-muted-foreground">&#8984;K</span>
           </button>}
           {mob && <button onClick={() => setCmdOpen(true)} className="p-2 rounded-lg bg-card border border-border cursor-pointer"><Icon name="search" size={16} color="var(--muted-foreground)" /></button>}
           <motion.button whileTap={{ scale: .9 }} onClick={() => setNotifOpen(!notifOpen)} className={cn(
@@ -47,7 +47,7 @@ export default function TopBar({ mob, sel, view, nav, prg, setSidebarOpen, setCm
             notifOpen ? "bg-[rgba(147,197,253,0.1)]" : "bg-card"
           )}>
             <Icon name="bell" size={16} color={'#2563EB'} />
-            {unread > 0 && <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-bold text-[8px] text-white" style={{ background: u.err }}>{unread}</motion.span>}
+            {unread > 0 && <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-bold text-xs text-white" style={{ background: u.err }}>{unread}</motion.span>}
           </motion.button>
         </div>
       </div>

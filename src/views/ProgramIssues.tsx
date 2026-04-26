@@ -3,9 +3,10 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Icon as I } from '../components/Icons';
 import { u, accent, accentText } from '../tokens';
 import { Cd, Av } from '../components/ui';
-import { USERS } from '../data';
+import DescriptionInput from '../components/DescriptionModal';
+import { useUsers } from '../hooks/useUsers';
 import { useCurrentUser } from '../hooks/useCurrentUser';
-import type { User } from '../types';
+import type { User, Milestone } from '../types';
 
 interface Issue {
   id: string;
@@ -13,6 +14,7 @@ interface Issue {
   title: string;
   description: string;
   severity: 'critical' | 'high' | 'medium' | 'low';
+  milestone?: string;
   status: string;
   ownerId: string;
   ownerName: string;
@@ -51,13 +53,15 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
 interface Props {
   programId: string;
   isEditor: boolean;
+  milestones?: Milestone[];
 }
 
-export default function ProgramIssues({ programId, isEditor }: Props) {
+export default function ProgramIssues({ programId, isEditor, milestones = [] }: Props) {
   const ME = useCurrentUser();
+  const USERS = useUsers();
   const [issues, setIssues] = useState<Issue[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: '', description: '', severity: 'medium' as Issue['severity'], ownerId: '' });
+  const [form, setForm] = useState({ title: '', description: '', severity: 'medium' as Issue['severity'], ownerId: '', milestone: '' });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
@@ -72,12 +76,13 @@ export default function ProgramIssues({ programId, isEditor }: Props) {
   const createIssue = async () => {
     if (!form.title.trim()) return;
     try {
+      const { milestone: ms, ...rest } = form;
       const issue = await apiFetch<Issue>('/program-issues', {
         method: 'POST',
-        body: JSON.stringify({ programId, ...form }),
+        body: JSON.stringify({ programId, ...rest, ...(ms ? { milestone: ms } : {}) }),
       });
       setIssues(prev => [issue, ...prev]);
-      setForm({ title: '', description: '', severity: 'medium', ownerId: '' });
+      setForm({ title: '', description: '', severity: 'medium', ownerId: '', milestone: '' });
       setShowForm(false);
     } catch {}
   };
@@ -128,8 +133,7 @@ export default function ProgramIssues({ programId, isEditor }: Props) {
           <div className="space-y-3">
             <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Issue title…"
               className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground focus:border-primary" />
-            <textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Description…" rows={2}
-              className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none bg-card border border-border text-foreground focus:border-primary" />
+            <DescriptionInput value={form.description} onChange={v => setForm({ ...form, description: v })} placeholder="Describe the issue…" label="Issue Description" />
             <div className="flex gap-3">
               <div className="flex-1">
                 <label className="text-xs mb-1 block text-muted-foreground">Severity</label>
@@ -146,6 +150,16 @@ export default function ProgramIssues({ programId, isEditor }: Props) {
                   {USERS.map(u2 => <option key={u2.id} value={u2.id}>{u2.name}</option>)}
                 </select>
               </div>
+              {milestones.length > 0 && (
+                <div className="flex-1">
+                  <label className="text-xs mb-1 block text-muted-foreground">Milestone</label>
+                  <select value={form.milestone} onChange={e => setForm({ ...form, milestone: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground">
+                    <option value="">No milestone</option>
+                    {milestones.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                  </select>
+                </div>
+              )}
             </div>
             <motion.button whileTap={{ scale: .95 }} disabled={!form.title.trim()} onClick={createIssue}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold"
@@ -171,22 +185,23 @@ export default function ProgramIssues({ programId, isEditor }: Props) {
                   <span className="w-2 h-2 rounded-full flex-shrink-0 mt-1.5" style={{ background: sev.color }} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{ color: sev.color, background: sev.bg }}>{sev.label}</span>
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{ color: st.color, background: st.bg }}>{iss.status.replace('_', ' ')}</span>
+                      <span className="px-1.5 py-0.5 rounded text-xs font-bold" style={{ color: sev.color, background: sev.bg }}>{sev.label}</span>
+                      <span className="px-1.5 py-0.5 rounded text-xs font-bold" style={{ color: st.color, background: st.bg }}>{iss.status.replace('_', ' ')}</span>
                     </div>
                     <div className="text-xs font-medium text-foreground">{iss.title}</div>
                     {iss.description && <div className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{iss.description}</div>}
-                    {iss.escalationNote && <div className="text-[10px] mt-1 px-2 py-1 rounded" style={{ background: u.errD, color: u.err }}>Escalated: {iss.escalationNote}</div>}
-                    {iss.resolution && <div className="text-[10px] mt-1 px-2 py-1 rounded" style={{ background: u.okD, color: u.ok }}>Resolved: {iss.resolution}</div>}
+                    {iss.escalationNote && <div className="text-xs mt-1 px-2 py-1 rounded" style={{ background: u.errD, color: u.err }}>Escalated: {iss.escalationNote}</div>}
+                    {iss.resolution && <div className="text-xs mt-1 px-2 py-1 rounded" style={{ background: u.okD, color: u.ok }}>Resolved: {iss.resolution}</div>}
                     <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
                       <span>Owner: {iss.ownerName}</span>
+                      {iss.milestone && <><span>&middot;</span><span className="font-bold">{iss.milestone}</span></>}
                     </div>
                     {/* Status actions */}
                     {!resolved && (
                       <div className="flex gap-1 flex-wrap mt-2">
                         {(['open', 'in_progress'] as const).map(s => (
                           <motion.button key={s} whileTap={{ scale: .88 }} onClick={() => updateStatus(iss.id, s)}
-                            className="px-2 py-0.5 rounded-md cursor-pointer text-[8px]"
+                            className="px-2 py-0.5 rounded-md cursor-pointer text-xs"
                             style={{ border: `1px solid ${iss.status === s ? st.color : 'var(--border)'}`, background: iss.status === s ? st.bg : 'transparent', color: iss.status === s ? st.color : 'var(--muted-foreground)', fontWeight: iss.status === s ? 700 : 400 }}>
                             {s.replace('_', ' ')}
                           </motion.button>
@@ -196,7 +211,7 @@ export default function ProgramIssues({ programId, isEditor }: Props) {
                             const resolution = prompt('Resolution note:');
                             if (resolution) resolveIssue(iss.id, resolution);
                           }}
-                            className="px-2 py-0.5 rounded-md cursor-pointer text-[8px] font-bold"
+                            className="px-2 py-0.5 rounded-md cursor-pointer text-xs font-bold"
                             style={{ border: `1px solid ${u.ok}`, color: u.ok, background: u.okD }}>
                             resolve
                           </motion.button>

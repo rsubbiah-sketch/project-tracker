@@ -14,9 +14,10 @@ interface NotificationDrawerProps {
   notifs: Notification[];
   setNotifs: React.Dispatch<React.SetStateAction<Notification[]>>;
   unread: number;
+  onNotifClick?: (n: Notification) => void;
 }
 
-export default function NotificationDrawer({ mob, notifOpen, setNotifOpen, notifs, setNotifs, unread }: NotificationDrawerProps) {
+export default function NotificationDrawer({ mob, notifOpen, setNotifOpen, notifs, setNotifs, unread, onNotifClick }: NotificationDrawerProps) {
   return (
     <AnimatePresence>
       {notifOpen && (
@@ -39,8 +40,15 @@ export default function NotificationDrawer({ mob, notifOpen, setNotifOpen, notif
             <div className="flex-1 overflow-auto p-4 space-y-3">
               {notifs.map((ni, idx) => (
                 <motion.div key={ni.id} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * .04 }}
+                  onClick={() => {
+                    if (!ni.read) setNotifs(p => p.map(x => x.id === ni.id ? { ...x, read: true } : x));
+                    onNotifClick?.(ni);
+                    setNotifOpen(false);
+                  }}
+                  role="button"
+                  tabIndex={0}
                   className={cn(
-                    "flex gap-3 p-3 rounded-lg",
+                    "flex gap-3 p-3 rounded-lg cursor-pointer hover:bg-accent/40 transition-colors",
                     !ni.read && "bg-card border border-border",
                     ni.read && "bg-transparent border border-transparent"
                   )}>

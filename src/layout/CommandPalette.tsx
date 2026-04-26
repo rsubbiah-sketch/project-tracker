@@ -34,14 +34,14 @@ export default function CommandPalette({ cmdOpen, setCmdOpen, prg, nav, setSel, 
               <span className="px-2 py-0.5 rounded text-xs font-mono bg-border text-muted-foreground">ESC</span>
             </div>
             <div className="p-2 max-h-[60vh] md:max-h-80 overflow-auto">
-              <div className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Programs</div>
+              <div className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-muted-foreground">Programs</div>
               {prg.map(p => (
                 <button key={p.id} onClick={() => { setSel(p.id); setView("programs"); setCmdOpen(false); }}
                   className="flex items-center gap-2 md:gap-3 w-full px-3 py-2.5 rounded-lg text-left transition-colors hover:bg-[rgba(147,197,253,.06)] text-foreground border-none bg-transparent cursor-pointer font-[inherit]">
                   <TB type={p.type} /><span className="text-xs font-medium truncate">{p.name}</span><span className="ml-auto text-xs flex-shrink-0 text-muted-foreground">{p.id}</span>
                 </button>
               ))}
-              <div className="px-3 py-1.5 mt-2 text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Quick Actions</div>
+              <div className="px-3 py-1.5 mt-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">Quick Actions</div>
               {nav.map(ni => (
                 <button key={ni.id} onClick={() => { goTo(ni.id); setCmdOpen(false); }}
                   className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-left transition-colors hover:bg-[rgba(147,197,253,.06)] border-none bg-transparent cursor-pointer font-[inherit]" style={{ color: '#2563EB' }}>

@@ -1,14 +1,19 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Icon as I } from '../components/Icons';
-import { u, ST, PROGRAM_TYPES, SUBTYPES, PROGRAM_PHASES, PHASE_COLOR, PROGRESS_COLOR, accent, accentText } from '../tokens';
+import { PROGRAM_TYPES, SUBTYPES, PROGRAM_PHASES } from '../tokens';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { Av, SB, TB, PB, GB, Spark, Cd } from '../components/ui';
-import { USERS, ME } from '../data/index';
-import type { Program, Comment, Milestone, Task, HealthOverride, ProgramHealth, KeyIssue, Sig } from '../types';
-import { createProgram } from '../services/api';
-import { calcHealth, healthColor, healthLabel, healthBg, DIM_META } from '../utils/health';
-import { HealthStrip, emptyHealth } from '../components/Health';
+import { Cd } from '../components/ui';
+import { useUsers } from '../hooks/useUsers';
+import { useCurrentUser } from '../hooks/useCurrentUser';
+import type { Program, Comment, Milestone, MilestoneCategory, Task, HealthOverride, ProgramHealth, KeyIssue } from '../types';
+import { createProgram, updateProgram as apiUpdateProgram, deleteProgram as apiDeleteProgram } from '../services/api';
+import { mapProgram } from '../services/mappers';
+import DescriptionInput from '../components/DescriptionModal';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { calcHealth, healthColor, healthLabel } from '../utils/health';
+import { useRBAC } from '../hooks/useRBAC';
+import { emptyHealth } from '../components/Health';
 
 interface ProgramListProps {
   prg: Program[];
@@ -16,11 +21,10 @@ interface ProgramListProps {
   go: (id: string) => void;
   com: Comment[];
   tasks?: Task[];
-  gateSt?: Record<string, string>;
   healthOverrides?: Record<string, HealthOverride>;
 }
 
-const emptyMilestone = (): Milestone => ({ name: "", date: "", status: "pending" });
+const emptyMilestone = (): Milestone => ({ name: "", date: "", status: "pending", category: "product" });
 
 interface FormState {
   name: string;
@@ -41,32 +45,72 @@ interface FormState {
   issues: KeyIssue[];
 }
 
-const emptyForm = (): FormState => ({
-  name: "",
-  desc: "",
-  type: "HW",
-  subType: SUBTYPES["HW"]?.[0] || "",
-  customSubType: "",
-  currentPhase: "New",
-  owner: USERS[0].id,
-  assignedBy: ME.id,
-  assignedDate: new Date().toISOString().split("T")[0],
-  deliveryAsk: "",
-  deliveryCommit: "",
-  team: "",
-  budget: "",
-  milestones: [emptyMilestone()],
-  health: emptyHealth(),
-  issues: [],
-});
-
-export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt = {}, healthOverrides = {} }: ProgramListProps) {
+export default function ProgramList({ prg, setPrg, go, com, tasks = [], healthOverrides = {} }: ProgramListProps) {
   const mob = useIsMobile();
+  const rbac = useRBAC();
+  const USERS = useUsers();
+  const ME = useCurrentUser();
+
+  const emptyForm = (): FormState => ({
+    name: "",
+    desc: "",
+    type: "HW",
+    subType: SUBTYPES["HW"]?.[0] || "",
+    customSubType: "",
+    currentPhase: "New",
+    owner: USERS[0]?.id || ME.id,
+    assignedBy: ME.id,
+    assignedDate: new Date().toISOString().split("T")[0],
+    deliveryAsk: "",
+    deliveryCommit: "",
+    team: "",
+    budget: "",
+    milestones: [emptyMilestone()],
+    health: emptyHealth(),
+    issues: [],
+  });
   const [f, setF] = useState("All");
   const [q, setQ] = useState("");
   const [showNew, setShowNew] = useState(false);
+  const [editingProgram, setEditingProgram] = useState<Program | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [showCustomInput, setShowCustomInput] = useState(false);
+
+  const isEditing = !!editingProgram;
+  const showForm = showNew || isEditing;
+
+  const startEdit = (p: Program) => {
+    setEditingProgram(p);
+    setShowNew(false);
+    const knownSubs = SUBTYPES[p.type] || [];
+    const isCustomSubType = !!p.subType && !knownSubs.includes(p.subType);
+    setForm({
+      name: p.name,
+      desc: p.desc || '',
+      type: p.type as FormState['type'],
+      subType: isCustomSubType ? '' : (p.subType || knownSubs[0] || ''),
+      customSubType: isCustomSubType ? p.subType : '',
+      currentPhase: p.currentPhase as FormState['currentPhase'],
+      owner: p.owner.id,
+      assignedBy: p.assignedBy?.id || ME.id,
+      assignedDate: p.assignedDate || '',
+      deliveryAsk: p.deliveryAsk || '',
+      deliveryCommit: p.deliveryCommit || '',
+      team: String(p.team || ''),
+      budget: p.budget || '',
+      milestones: (p.milestones && p.milestones.length > 0) ? p.milestones : [emptyMilestone()],
+      health: p.health || emptyHealth(),
+      issues: p.issues || [],
+    });
+    setShowCustomInput(isCustomSubType);
+  };
+
+  const cancelForm = () => {
+    setForm(emptyForm());
+    setShowCustomInput(false);
+    setShowNew(false);
+    setEditingProgram(null);
+  };
 
   /* ── helpers ── */
   const upd = (patch: Partial<FormState>) => setForm(prev => ({ ...prev, ...patch }));
@@ -87,53 +131,102 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
   const canSubmit = form.name.trim() && form.milestones.some(m => m.name.trim());
 
   /* ── create program ── */
-  const createPrg = () => {
-    if (!canSubmit) return;
-    const owner = USERS.find(u2 => u2.id === form.owner) || USERS[0];
+  const [saving, setSaving] = useState(false);
+  const createPrg = async () => {
+    if (!canSubmit || saving) return;
+    setSaving(true);
+    const owner = USERS.find(u2 => u2.id === form.owner) || USERS[0] || ME;
     const ab = USERS.find(u2 => u2.id === form.assignedBy) || ME;
-    const newPrg: Program = {
-      id: `PRG-${String(prg.length + 1).padStart(3, "0")}`,
+    const subType = showCustomInput ? form.customSubType : form.subType;
+    const milestones = form.milestones.filter(m => m.name.trim());
+    const mode = form.currentPhase === "New" ? "planning" : "active";
+
+    try {
+      const saved = await createProgram({
+        name: form.name,
+        type: form.type,
+        subType,
+        currentPhase: form.currentPhase,
+        description: form.desc,
+        assignedById: form.assignedBy,
+        assignedByName: ab.name,
+        assignedDate: form.assignedDate || new Date().toISOString().split("T")[0],
+        deliveryAsk: form.deliveryAsk,
+        deliveryCommit: form.deliveryCommit,
+        budget: form.budget || "TBD",
+        team: parseInt(form.team) || 0,
+        mode,
+        milestones,
+      });
+      // Use real Firestore ID from API response
+      setPrg(prev => [...prev, mapProgram(saved)]);
+    } catch (err) {
+      console.error('Failed to create program:', err);
+      alert('Failed to create program. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+    cancelForm();
+  };
+
+  /* ── update program ── */
+  const updatePrg = async () => {
+    if (!canSubmit || !editingProgram || saving) return;
+    setSaving(true);
+    const owner = USERS.find(u2 => u2.id === form.owner) || USERS[0] || ME;
+    const ab = USERS.find(u2 => u2.id === form.assignedBy) || ME;
+    const subType = showCustomInput ? form.customSubType : form.subType;
+    const milestones = form.milestones.filter(m => m.name.trim());
+
+    // Optimistic update
+    setPrg(prev => prev.map(p => p.id === editingProgram.id ? {
+      ...p,
       name: form.name,
       type: form.type,
-      subType: showCustomInput ? form.customSubType : form.subType,
+      subType,
       currentPhase: form.currentPhase,
       owner,
       assignedBy: ab,
-      assignedDate: form.assignedDate || new Date().toISOString().split("T")[0],
+      assignedDate: form.assignedDate || p.assignedDate,
       lastUpdate: new Date().toISOString(),
       deliveryAsk: form.deliveryAsk,
       deliveryCommit: form.deliveryCommit,
       desc: form.desc,
-      progress: 0,
       team: parseInt(form.team) || 0,
-      budget: form.budget || "TBD",
-      budgetUsed: 0,
-      mode: form.currentPhase === "New" ? "planning" : "active",
-      spark: [0],
-      milestones: form.milestones.filter(m => m.name.trim()),
+      budget: form.budget || p.budget,
+      milestones,
       health: form.health,
       issues: form.issues,
-    };
-    setPrg(prev => [...prev, newPrg]);
-    createProgram({
-      name: form.name,
-      type: form.type,
-      subType: showCustomInput ? form.customSubType : form.subType,
-      currentPhase: form.currentPhase,
-      description: form.desc,
-      assignedById: form.assignedBy,
-      assignedDate: form.assignedDate || new Date().toISOString().split("T")[0],
-      deliveryAsk: form.deliveryAsk,
-      deliveryCommit: form.deliveryCommit,
-      budget: form.budget || "TBD",
-      team: parseInt(form.team) || 0,
-      mode: form.currentPhase === "New" ? "planning" : "active",
-      milestones: form.milestones.filter(m => m.name.trim()),
-    }).catch(() => {});
-    setForm(emptyForm());
-    setShowCustomInput(false);
-    setShowNew(false);
+    } : p));
+
+    try {
+      await apiUpdateProgram(editingProgram.id, {
+        name: form.name,
+        type: form.type,
+        subType,
+        currentPhase: form.currentPhase,
+        description: form.desc,
+        assignedById: form.assignedBy,
+        assignedByName: ab.name,
+        assignedDate: form.assignedDate,
+        deliveryAsk: form.deliveryAsk,
+        deliveryCommit: form.deliveryCommit,
+        team: parseInt(form.team) || 0,
+        budget: form.budget,
+        milestones,
+        health: form.health,
+        issues: form.issues,
+      });
+    } catch (err) {
+      console.error('Failed to update program:', err);
+      alert('Failed to save program changes. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+    cancelForm();
   };
+
+  const handleSubmit = isEditing ? updatePrg : createPrg;
 
   /* ── filter & sort ── */
   const list = (f === "All" ? prg : prg.filter(p => p.type === f))
@@ -148,39 +241,42 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-base md:text-lg font-bold text-foreground">Programs</h2>
-        <motion.button whileTap={{ scale: .95 }} onClick={() => setShowNew(!showNew)}
-          className="px-3 md:px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5"
-          style={{ background: showNew ? 'var(--border)' : accent, color: showNew ? 'var(--foreground)' : accentText, border: `1px solid ${showNew ? 'var(--border)' : accent}` }}>
-          <I name={showNew ? "x" : "plus"} size={12} color={showNew ? 'var(--foreground)' : accentText} />{showNew ? "Cancel" : "New Program"}
-        </motion.button>
+      <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Programs</h1>
+          <p className="text-sm text-muted-foreground mt-1">Browse and manage your program portfolio</p>
+        </div>
+        {rbac.isProgramAdmin && (
+          <button onClick={() => { if (showForm) cancelForm(); else setShowNew(true); }} className={`inline-flex items-center gap-1.5 h-9 px-4 rounded-md text-sm font-medium transition-colors cursor-pointer ${showForm ? 'border border-border bg-background hover:bg-muted text-foreground' : 'bg-primary text-primary-foreground hover:bg-primary/90'}`}>
+            <I name={showForm ? "x" : "plus"} size={14} color="currentColor" />{showForm ? "Cancel" : "New Program"}
+          </button>
+        )}
       </div>
 
       {/* Filters + search */}
-      <div className="flex flex-col md:flex-row gap-2 md:gap-3 mb-5">
-        <div className="flex gap-1.5 overflow-x-auto pb-1 flex-shrink-0">
-          {["All", ...PROGRAM_TYPES].map(x => (
-            <motion.button key={x} whileTap={{ scale: .95 }} onClick={() => setF(x)}
-              className="px-3 md:px-4 py-1.5 rounded-full text-xs font-bold flex-shrink-0"
-              style={{ background: f === x ? accent : 'var(--card)', color: f === x ? accentText : 'var(--secondary-foreground)', border: `1px solid ${f === x ? accent : 'var(--border)'}` }}>
-              {x}
-            </motion.button>
-          ))}
-        </div>
-        <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-card border border-border">
+      <div className="flex flex-col md:flex-row gap-2 md:gap-2 mb-5">
+        <select
+          value={f}
+          onChange={e => setF(e.target.value)}
+          className="h-9 rounded-md border border-border bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] cursor-pointer"
+        >
+          <option value="All">All Types</option>
+          {PROGRAM_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <div className="flex-1 flex items-center gap-2 h-9 px-3 rounded-md border border-border bg-background shadow-xs">
           <I name="search" size={14} color="var(--muted-foreground)" />
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter programs…" className="bg-transparent text-xs outline-none flex-1 text-foreground" />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter programs…" className="bg-transparent text-sm outline-none flex-1 text-foreground placeholder:text-muted-foreground" />
         </div>
       </div>
 
-      {/* ═══ NEW PROGRAM FORM ═══ */}
-      <AnimatePresence>{showNew && (
+      {/* ═══ PROGRAM FORM (Create / Edit) ═══ */}
+      <AnimatePresence>{showForm && (
         <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}>
           <Cd delay={0} hover={false} className="p-4 md:p-5 mb-5">
             <div className="flex items-center gap-2 mb-3">
-              <I name="folder" size={16} color="var(--foreground)" />
-              <span className="text-sm font-bold text-foreground">Create New Program</span>
+              <I name={isEditing ? "edit" : "folder"} size={16} color="var(--foreground)" />
+              <span className="text-sm font-semibold text-foreground">{isEditing ? 'Edit Program' : 'Create New Program'}</span>
+              {isEditing && <span className="text-xs text-muted-foreground">— {editingProgram?.name}</span>}
             </div>
             <div className="space-y-3">
               {/* Row 1: Name */}
@@ -193,8 +289,7 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
               {/* Row 2: Description */}
               <div>
                 <label className={lbl}>Description</label>
-                <textarea value={form.desc} onChange={e => upd({ desc: e.target.value })}
-                  placeholder="Description…" rows={2} className={`${inp} resize-none`} />
+                <DescriptionInput value={form.desc} onChange={v => upd({ desc: v })} placeholder="Add program description…" label="Program Description" />
               </div>
 
               {/* Row 3: Type | Sub-Type | Current Phase */}
@@ -215,8 +310,19 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
                 <div style={{ width: 180 }}>
                   <label className={lbl}>Sub-Type</label>
                   {showCustomInput ? (
-                    <input value={form.customSubType} onChange={e => upd({ customSubType: e.target.value })}
-                      placeholder="Custom sub-type…" className={inp} />
+                    <div className="flex items-center gap-1.5">
+                      <input value={form.customSubType} onChange={e => upd({ customSubType: e.target.value })}
+                        placeholder="Custom sub-type…" className={inp} />
+                      <button type="button"
+                        onClick={() => {
+                          setShowCustomInput(false);
+                          upd({ subType: SUBTYPES[form.type]?.[0] || "", customSubType: "" });
+                        }}
+                        title="Back to preset list"
+                        className="inline-flex items-center justify-center h-9 w-9 flex-shrink-0 rounded-md border border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer">
+                        <I name="x" size={14} color="currentColor" />
+                      </button>
+                    </div>
                   ) : (
                     <select value={form.subType}
                       onChange={e => {
@@ -262,7 +368,7 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
                 </div>
               </div>
 
-              {/* Row 5: Delivery ASK | Delivery Commit | Team Size | Budget */}
+              {/* Row 5: Delivery ASK | Delivery Commit */}
               <div className="flex flex-wrap gap-3">
                 <div className="flex-1 min-w-[140px]">
                   <label className={lbl}>Delivery Date (ASK)</label>
@@ -271,14 +377,6 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
                 <div className="flex-1 min-w-[140px]">
                   <label className={lbl}>Delivery Commit</label>
                   <input type="date" value={form.deliveryCommit} onChange={e => upd({ deliveryCommit: e.target.value })} className={inp} />
-                </div>
-                <div style={{ width: 100 }}>
-                  <label className={lbl}>Team Size</label>
-                  <input type="number" min="0" value={form.team} onChange={e => upd({ team: e.target.value })} placeholder="0" className={inp} />
-                </div>
-                <div style={{ width: 120 }}>
-                  <label className={lbl}>Budget</label>
-                  <input value={form.budget} onChange={e => upd({ budget: e.target.value })} placeholder="$0" className={inp} />
                 </div>
               </div>
 
@@ -290,10 +388,19 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
                     <div key={idx} className="flex flex-wrap items-center gap-2">
                       <input value={ms.name} onChange={e => setMilestone(idx, { name: e.target.value })}
                         placeholder="Milestone name…" className={`${inp} flex-1`} style={{ minWidth: 120 }} />
+                      <select value={ms.category || 'product'} onChange={e => setMilestone(idx, { category: e.target.value as MilestoneCategory })}
+                        className={inp} style={{ width: 145 }}>
+                        <option value="product">Product</option>
+                        <option value="execution">Execution</option>
+                        <option value="ttm">Time to Market</option>
+                      </select>
                       <input type="date" value={ms.date} onChange={e => setMilestone(idx, { date: e.target.value })}
                         className={inp} style={{ width: 150 }} />
-                      <input value={ms.owner || ''} onChange={e => setMilestone(idx, { owner: e.target.value })}
-                        placeholder="Owner…" className={inp} style={{ width: 100 }} />
+                      <select value={ms.owner || ''} onChange={e => setMilestone(idx, { owner: e.target.value })}
+                        className={inp} style={{ width: 140 }}>
+                        <option value="">Owner…</option>
+                        {USERS.map(u2 => <option key={u2.id} value={u2.name.split(' ').pop() || u2.name}>{u2.name}</option>)}
+                      </select>
                       <select value={ms.status} onChange={e => setMilestone(idx, { status: e.target.value as Milestone["status"] })}
                         className={inp} style={{ width: 100 }}>
                         <option value="pending">Pending</option>
@@ -315,151 +422,166 @@ export default function ProgramList({ prg, setPrg, go, com, tasks = [], gateSt =
                 </motion.button>
               </div>
 
-              {/* Row 7: Cancel + Create */}
+              {/* Row 7: Cancel + Submit */}
               <div className="flex items-center gap-3 pt-1">
-                <motion.button whileTap={{ scale: .95 }} onClick={() => { setForm(emptyForm()); setShowCustomInput(false); setShowNew(false); }}
-                  className="px-4 py-2.5 rounded-lg text-xs font-bold border border-border text-muted-foreground hover:text-foreground">
+                <button onClick={cancelForm}
+                  className="inline-flex items-center justify-center h-9 px-4 rounded-md text-sm font-medium border border-border bg-background hover:bg-muted text-foreground transition-colors cursor-pointer">
                   Cancel
-                </motion.button>
-                <motion.button whileTap={{ scale: .95 }} disabled={!canSubmit} onClick={createPrg}
-                  className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg text-xs font-bold"
-                  style={{ background: canSubmit ? accent : 'var(--border)', color: canSubmit ? accentText : 'var(--muted-foreground)', opacity: canSubmit ? 1 : .5 }}>
-                  <I name="plus" size={12} color={canSubmit ? accentText : 'var(--muted-foreground)'} />Create Program
-                </motion.button>
+                </button>
+                <button disabled={!canSubmit || saving} onClick={handleSubmit}
+                  className="inline-flex items-center gap-1.5 h-9 px-4 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer disabled:opacity-50 disabled:pointer-events-none">
+                  <I name={isEditing ? "check" : "plus"} size={12} color="currentColor" />{saving ? 'Saving…' : isEditing ? 'Save Changes' : 'Create Program'}
+                </button>
               </div>
             </div>
           </Cd>
         </motion.div>
       )}</AnimatePresence>
 
-      {/* ═══ PROGRAM CARDS ═══ */}
-      <div className="space-y-3">
-        {list.map((p, i) => {
-          const phaseColor = PROGRESS_COLOR[p.currentPhase] || PROGRESS_COLOR.Active;
-          const commentCount = com.filter(c => c.eId === p.id).length;
-          const updateDate = p.lastUpdate ? new Date(p.lastUpdate).toLocaleDateString() : "";
-
-          return (
-            <Cd key={p.id} delay={i * .04} onClick={() => go(p.id)} className={mob ? "p-4" : "flex items-center gap-4 px-5 py-3.5"}>
-              {mob ? (
-                <>
-                  {/* Mobile: row 1 badges */}
-                  <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-                    <span className="text-[10px] font-mono text-muted-foreground">{p.id}</span>
-                    <TB type={p.type} />
-                    {p.subType && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-border text-muted-foreground">{p.subType}</span>
-                    )}
-                    <PB phase={p.currentPhase || "New"} />
-                    {p.mode === "planning" && (
-                      <span className="text-[8px] font-black px-2 py-0.5 rounded" style={{ background: u.purD, color: u.pur }}>DRAFT</span>
-                    )}
-                  </div>
-                  {/* Mobile: name */}
-                  <div className="text-sm font-bold mb-1 text-foreground truncate">{p.name}</div>
-                  {/* Mobile: desc */}
-                  {p.desc && (
-                    <div className="text-xs text-muted-foreground mb-2 line-clamp-2">{p.desc}</div>
-                  )}
-                  {/* Mobile: health strip */}
-                  {p.health && (
-                    <div className="mb-2">
-                      <HealthStrip health={p.health} issues={p.issues} />
-                    </div>
-                  )}
-                  {/* Mobile: bottom row */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Av user={p.owner} size={20} />
-                      <span className="text-xs text-secondary-foreground">{p.owner.name}</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="w-16"><GB pct={p.progress} h={4} color={phaseColor} /></div>
-                      <span className="text-xs font-bold text-muted-foreground">{p.progress}%</span>
-                      <I name="chevR" size={14} color="var(--muted-foreground)" />
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  {/* Desktop layout */}
-                  {(() => {
-                    const h = calcHealth(p, tasks, gateSt);
-                    const override = healthOverrides[p.id];
-                    const displayLabel = override?.label || h.label;
-                    const overrideScore = override?.label === 'On Track' ? 80 : override?.label === 'At Risk' ? 60 : 30;
-                    const displayColor = override?.label ? healthColor(overrideScore) : h.color;
-                    return (
-                  <>
-                  <div className="flex-1 min-w-0">
-                    {/* Row 1: badges */}
-                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                      <span className="text-[10px] font-mono text-muted-foreground">{p.id}</span>
-                      <TB type={p.type} />
-                      {p.subType && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-border text-muted-foreground">{p.subType}</span>
-                      )}
-                      <PB phase={p.currentPhase || "New"} />
-                      <span className="px-2 py-0.5 rounded-full text-[9px] font-bold" style={{ background: healthBg(override?.label ? overrideScore : h.composite), color: displayColor }}>
-                        {override?.label ? `${displayLabel} (PM)` : displayLabel} {h.composite}
-                      </span>
-                      {p.mode === "planning" && (
-                        <span className="text-[8px] font-black px-2 py-0.5 rounded" style={{ background: u.purD, color: u.pur }}>DRAFT</span>
-                      )}
-                    </div>
-                    {/* Row 2: name */}
-                    <div className="text-sm font-bold text-foreground truncate">{p.name}</div>
-                    {/* Row 3: description */}
-                    {p.desc && (
-                      <div className="text-[11px] text-muted-foreground mt-0.5 truncate max-w-[400px]">{p.desc}</div>
-                    )}
-                  </div>
-
-                  {/* Owner + lastUpdate */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <Av user={p.owner} size={22} />
-                    <div className="text-right">
-                      <div className="text-xs text-secondary-foreground">{p.owner.name}</div>
-                      {updateDate && <div className="text-[10px] text-muted-foreground">{updateDate}</div>}
-                    </div>
-                  </div>
-
-                  {/* Health strip (manual signals) */}
-                  {p.health ? (
-                    <HealthStrip health={p.health} issues={p.issues} />
-                  ) : (
-                    /* Fallback: auto-calc traffic dots */
-                    <div className="flex items-center gap-1.5 flex-shrink-0" title={Object.entries(h.dims).map(([k, v]) => `${DIM_META[k].label}: ${v}`).join(' | ')}>
-                      {Object.entries(h.dims).map(([k, v]) => (
-                        <div key={k} className="flex flex-col items-center gap-0.5">
-                          <span className="rounded-full inline-block" style={{ width: 10, height: 10, background: healthColor(v) }} />
-                          <span className="text-[7px] text-muted-foreground">{DIM_META[k].label[0]}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Progress bar */}
-                  <div className="w-20 flex-shrink-0">
-                    <GB pct={p.progress} h={5} color={phaseColor} />
-                    <div className="text-center text-xs mt-1 text-muted-foreground">{p.progress}%</div>
-                  </div>
-
-                  {/* Comment count */}
-                  <span className="text-xs flex items-center gap-1 text-muted-foreground flex-shrink-0">
-                    <I name="chat" size={11} color="var(--muted-foreground)" />{commentCount}
-                  </span>
-
-                  <I name="chevR" size={14} color="var(--muted-foreground)" />
-                  </>
-                    );
-                  })()}
-                </>
-              )}
-            </Cd>
-          );
-        })}
-      </div>
+      {/* ═══ PROGRAMS TABLE — shadcn style ═══ */}
+      <ProgramTable list={list} go={go} tasks={tasks} healthOverrides={healthOverrides} setPrg={setPrg} onEdit={startEdit} />
     </motion.div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────── */
+/* Shadcn-style Programs Table                                   */
+/* ────────────────────────────────────────────────────────────── */
+function ProgramTable({ list, go, tasks, healthOverrides, setPrg, onEdit }: {
+  list: Program[];
+  go: (id: string) => void;
+  tasks: Task[];
+  healthOverrides: Record<string, HealthOverride>;
+  setPrg: React.Dispatch<React.SetStateAction<Program[]>>;
+  onEdit: (p: Program) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(null);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [menuOpen]);
+
+  const deleteProgram = async (id: string) => {
+    let removed: Program | undefined;
+    setPrg(prev => {
+      removed = prev.find(p => p.id === id);
+      return prev.filter(p => p.id !== id);
+    });
+    try {
+      await apiDeleteProgram(id);
+    } catch (err) {
+      console.error('Failed to delete program:', err);
+      if (removed) setPrg(prev => [...prev, removed!]);
+    }
+    setDeleteTarget(null);
+    setMenuOpen(null);
+  };
+
+  const menuItem = "w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2";
+
+  return (
+    <div className="rounded-md border border-border overflow-visible">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/30 border-b border-border">
+          <tr>
+            <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">Program</th>
+            <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground w-28 hidden md:table-cell">Type</th>
+            <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground w-28 hidden md:table-cell">Phase</th>
+            <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground w-36 hidden lg:table-cell">Owner</th>
+            <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground w-28">Status</th>
+            <th className="px-4 py-3 text-right text-sm font-medium text-muted-foreground w-20">Health</th>
+            <th className="w-14 px-4 py-3 text-right text-sm font-medium text-muted-foreground">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.length === 0 ? (
+            <tr><td colSpan={7} className="text-center py-10 text-sm text-muted-foreground">No programs found</td></tr>
+          ) : list.map(p => {
+            const h = calcHealth(p, tasks);
+            const comp = h.composite;
+            const label = h.label;
+            const isMenuOpen = menuOpen === p.id;
+
+            return (
+              <tr key={p.id}
+                className="border-b border-border last:border-b-0 hover:bg-muted/30 transition-colors cursor-pointer"
+                onClick={() => go(p.id)}
+              >
+                <td className="px-4 py-3">
+                  <div className="text-sm font-medium text-foreground truncate max-w-xs">{p.name}</div>
+                </td>
+                <td className="px-4 py-3 hidden md:table-cell">
+                  <span className="text-sm text-muted-foreground">{p.type}{p.subType ? ` · ${p.subType}` : ''}</span>
+                </td>
+                <td className="px-4 py-3 hidden md:table-cell">
+                  <span className="text-sm text-muted-foreground">{p.currentPhase}</span>
+                </td>
+                <td className="px-4 py-3 hidden lg:table-cell">
+                  <span className="text-sm text-foreground truncate max-w-[140px] inline-block">{p.owner.name}</span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                    style={{ color: h.color, background: comp < 60 ? 'rgba(248,113,113,0.1)' : comp < 75 ? 'rgba(251,191,36,0.1)' : 'rgba(52,211,153,0.1)', border: `1px solid ${h.color}33` }}>
+                    {label}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <span className="text-sm font-semibold tabular-nums" style={{ color: comp < 60 ? '#F87171' : h.color }}>{comp}</span>
+                </td>
+                <td className="px-4 py-3 text-right relative" onClick={e => e.stopPropagation()}>
+                  <button
+                    onClick={() => setMenuOpen(isMenuOpen ? null : p.id)}
+                    className="inline-flex items-center justify-center h-7 w-7 rounded hover:bg-muted transition-colors cursor-pointer bg-transparent border-none"
+                    aria-label="Open actions menu"
+                  >
+                    <I name="more" size={16} color="var(--muted-foreground)" />
+                  </button>
+                  {isMenuOpen && (
+                    <div
+                      ref={menuRef}
+                      className="absolute right-2 top-full mt-1 w-44 bg-popover border border-border rounded-md shadow-md z-50 py-1"
+                      style={{ background: 'var(--popover, var(--card))' }}
+                    >
+                      <button onClick={() => { onEdit(p); setMenuOpen(null); }} className={menuItem}>
+                        <I name="edit" size={14} color="var(--muted-foreground)" />
+                        Edit
+                      </button>
+                      <button onClick={() => { go(p.id); setMenuOpen(null); }} className={menuItem}>
+                        <I name="folder" size={14} color="var(--muted-foreground)" />
+                        View details
+                      </button>
+                      <div className="h-px bg-border my-1" />
+                      <button
+                        onClick={() => { setDeleteTarget({ id: p.id, name: p.name }); setMenuOpen(null); }}
+                        className={`${menuItem} text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30`}
+                        style={{ color: '#dc2626' }}
+                      >
+                        <I name="trash" size={14} color="#dc2626" />
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Program"
+        message={`Are you sure you want to delete "${deleteTarget?.name}"? All associated tasks, comments, and documents will be permanently removed. This action cannot be undone.`}
+        confirmLabel="Delete Program"
+        onConfirm={() => deleteTarget && deleteProgram(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+      />
+    </div>
   );
 }

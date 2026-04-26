@@ -2,7 +2,7 @@
  * Maps backend flat data (ownerId, assigneeId, authorId)
  * to frontend nested objects (owner: User, assignee: User, author: User)
  */
-import type { Program, Task, Comment, Reply, Notification, User } from '../types';
+import type { Program, Task, Comment, Reply, Notification, User, ActionItem, Doc } from '../types';
 
 /** Convert Firestore timestamps (or ISO strings) to ISO string */
 function toISOString(val: any): string {
@@ -25,6 +25,7 @@ export function setUsersMap(users: any[]) {
       name: u.name || u.email?.split('@')[0] || 'Unknown',
       role: u.role || '',
       av: u.av || u.initials || (u.name || '??').split(' ').map((n: string) => n[0]).join('').toUpperCase(),
+      team: u.team || '',
     };
   }
 }
@@ -55,6 +56,8 @@ export function mapProgram(p: any): Program {
     mode: p.mode || 'planning',
     spark: p.spark || [0, 0, 0, 0, 0, 0, 0],
     milestones: p.milestones || [],
+    health: p.health || undefined,
+    issues: p.issues || undefined,
     status: p.status,
     phase: p.phase,
     start: p.startDate || p.start,
@@ -107,5 +110,38 @@ export function mapNotification(n: any): Notification {
     text: n.message || n.text || '',
     ts: toISOString(n.createdAt) || toISOString(n.ts) || new Date().toISOString(),
     read: n.read || false,
+    entityType: n.entityType,
+    entityId: n.entityId,
+    programId: n.programId,
+  };
+}
+
+export function mapActionItem(a: any): ActionItem {
+  return {
+    id: a.id,
+    title: a.title || '',
+    description: a.description || '',
+    status: a.status || 'Open',
+    priority: a.priority || 'P1',
+    assignee: a.assigneeId ? lookupUser(a.assigneeId) : undefined,
+    team: (a.teamIds || []).map((id: string) => lookupUser(id)),
+    reporter: lookupUser(a.reporterId) || { id: a.reporterId, name: a.reporterName || '', role: '', av: '?' },
+    dueDate: a.dueDate || '',
+    tags: a.tags || [],
+    createdAt: toISOString(a.createdAt) || new Date().toISOString(),
+    updatedAt: toISOString(a.updatedAt) || new Date().toISOString(),
+  };
+}
+
+export function mapDoc(d: any): Doc {
+  return {
+    id: d.id,
+    prgId: d.programId || d.prgId || '',
+    name: d.name || '',
+    type: d.type || 'link',
+    url: d.url || '',
+    addedBy: lookupUser(d.addedById),
+    addedAt: toISOString(d.createdAt) || new Date().toISOString(),
+    category: d.category || '',
   };
 }

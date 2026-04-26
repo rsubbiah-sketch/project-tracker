@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { UpscaleLogo } from '../components/Logo';
+
 import { useAuth } from '../hooks/useAuth';
 
 export default function Login() {
@@ -13,7 +13,7 @@ export default function Login() {
         className="w-full max-w-sm p-8 rounded-2xl border border-border bg-card text-center"
       >
         <div className="flex justify-center mb-6">
-          <UpscaleLogo width={180} height={36} id="login" />
+          <img src="/upscaleai-logo.svg" alt="UpscaleAI" width={180} height={36} className="dark:invert" />
         </div>
         <h1 className="text-lg font-bold text-foreground mb-2">Project Tracker</h1>
         <p className="text-sm text-muted-foreground mb-8">

@@ -6,6 +6,7 @@ import type {
   Notification,
   User,
   ImplPhase,
+  ActionItem,
 } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ async function apiFetch<T>(
   const res = await fetch(`${base}${path}`, {
     ...options,
     headers: { ...headers, ...(options.headers as Record<string, string>) },
+    cache: 'no-store',
   });
 
   if (!res.ok) {
@@ -85,7 +87,13 @@ export interface CreateProgramPayload {
   milestones?: { name: string; date: string; status: string }[];
 }
 
-export type UpdateProgramPayload = Partial<CreateProgramPayload>;
+export type UpdateProgramPayload = Partial<CreateProgramPayload> & {
+  health?: any;
+  issues?: any[];
+  progress?: number;
+  spark?: number[];
+  lastUpdate?: string;
+};
 
 export interface ApproveGatePayload {
   phase: string;
@@ -95,13 +103,13 @@ export interface ApproveGatePayload {
 
 export interface CreateTaskPayload {
   title: string;
-  prgId: string;
-  assignee: string;
-  reporter?: string;
+  programId: string;
+  assigneeId: string;
+  reporterId?: string;
   priority?: string;
   status?: string;
-  due?: string;
-  desc?: string;
+  dueDate?: string;
+  description?: string;
 }
 
 export type UpdateTaskPayload = Partial<CreateTaskPayload>;
@@ -114,26 +122,6 @@ export interface CreateCommentPayload {
 export interface CreateReplyPayload {
   commentId: string;
   body: string;
-}
-
-export interface GateItem {
-  id: string;
-  programId: string;
-  phase: string;
-  label: string;
-  done: boolean;
-  custom?: boolean;
-}
-
-export interface AddCustomGateItemPayload {
-  programId: string;
-  phase: string;
-  label: string;
-}
-
-export interface SetGateItemStatusPayload {
-  id: string;
-  done: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,10 +278,10 @@ export function fetchUsers(): Promise<User[]> {
   return apiFetch<User[]>('/users');
 }
 
-export function updateUserRole(userId: string, role: string): Promise<User> {
-  return apiFetch<User>(`/users/${userId}/role`, {
+export function updateUser(userId: string, data: { role?: string; team?: string }): Promise<User> {
+  return apiFetch<User>(`/users/${userId}`, {
     method: 'PATCH',
-    body: JSON.stringify({ role }),
+    body: JSON.stringify(data),
   });
 }
 
@@ -318,33 +306,6 @@ export function updateImplTaskStatus(
   return apiFetch<ImplPhase>(`/impl-phases/${phaseId}/tasks/${taskId}`, {
     method: 'PATCH',
     body: JSON.stringify({ status }),
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Gate Items
-// ---------------------------------------------------------------------------
-
-export function fetchGateItems(programId: string, phase: string): Promise<GateItem[]> {
-  const qs = `?programId=${encodeURIComponent(programId)}&phase=${encodeURIComponent(phase)}`;
-  return apiFetch<GateItem[]>(`/gate-items${qs}`);
-}
-
-export function addCustomGateItem(data: AddCustomGateItemPayload): Promise<GateItem> {
-  return apiFetch<GateItem>('/gate-items/custom', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-}
-
-export function removeCustomGateItem(id: string): Promise<void> {
-  return apiFetch<void>(`/gate-items/custom/${id}`, { method: 'DELETE' });
-}
-
-export function setGateItemStatus(data: SetGateItemStatusPayload): Promise<GateItem> {
-  return apiFetch<GateItem>('/gate-items/status', {
-    method: 'PATCH',
-    body: JSON.stringify(data),
   });
 }
 
@@ -381,15 +342,15 @@ export function logout(): Promise<void> {
 // Admin — Additional endpoints
 // ---------------------------------------------------------------------------
 
-export function inviteUser(email: string, role: string): Promise<User> {
-  return apiFetch<User>('/admin/users/invite', {
+export function createUser(data: { email: string; name: string; role?: string; team?: string }): Promise<User> {
+  return apiFetch<User>('/users', {
     method: 'POST',
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify(data),
   });
 }
 
 export function deleteUser(userId: string): Promise<void> {
-  return apiFetch<void>(`/admin/users/${userId}`, { method: 'DELETE' });
+  return apiFetch<void>(`/users/${userId}`, { method: 'DELETE' });
 }
 
 // ---------------------------------------------------------------------------
@@ -430,4 +391,40 @@ export function assignProgramRole(data: { programId: string; userId: string; rol
 
 export function removeProgramMember(id: string): Promise<void> {
   return apiFetch<void>(`/program-members/${id}`, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
+// Action Items (independent of programs)
+// ---------------------------------------------------------------------------
+
+export interface ActionItemFilters {
+  assignee?: string;
+  status?: string;
+  priority?: string;
+  search?: string;
+}
+
+export function fetchActionItems(filters?: ActionItemFilters): Promise<ActionItem[]> {
+  const qs = filters ? toQuery(filters as Record<string, string | undefined>) : '';
+  return apiFetch<ActionItem[]>(`/action-items${qs}`);
+}
+
+export function createActionItem(data: {
+  title: string;
+  description?: string;
+  assigneeId?: string;
+  teamIds?: string[];
+  priority?: string;
+  dueDate?: string;
+  tags?: string[];
+}): Promise<ActionItem> {
+  return apiFetch<ActionItem>('/action-items', { method: 'POST', body: JSON.stringify(data) });
+}
+
+export function updateActionItem(id: string, data: Record<string, any>): Promise<ActionItem> {
+  return apiFetch<ActionItem>(`/action-items/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+
+export function deleteActionItem(id: string): Promise<void> {
+  return apiFetch<void>(`/action-items/${id}`, { method: 'DELETE' });
 }

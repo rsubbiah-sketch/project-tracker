@@ -3,7 +3,10 @@ export interface User {
   name: string;
   role: string;
   av: string;
+  team?: string;
 }
+
+export type MilestoneCategory = 'product' | 'execution' | 'ttm';
 
 export interface Milestone {
   name: string;
@@ -11,6 +14,10 @@ export interface Milestone {
   status: "pending" | "done";
   owner?: string;
   keyIssue?: string;
+  /** Which health dimension this milestone maps to */
+  category?: MilestoneCategory;
+  /** 0–100 score for this milestone's category dimension */
+  score?: number;
 }
 
 export interface Program {
@@ -69,6 +76,9 @@ export interface Notification {
   text: string;
   ts: string;
   read: boolean;
+  entityType?: 'comment' | 'reply' | string;
+  entityId?: string;
+  programId?: string;
 }
 
 export interface Task {
@@ -83,6 +93,29 @@ export interface Task {
   desc: string;
 }
 
+/* ─── Teams ─── */
+export interface Team {
+  id: string;
+  name: string;
+  memberIds: string[];
+}
+
+/* ─── Action Items (independent of programs) ─── */
+export interface ActionItem {
+  id: string;
+  title: string;
+  description: string;
+  status: 'Open' | 'In Progress' | 'In Review' | 'Done' | 'Closed';
+  priority: 'P0' | 'P1' | 'P2' | 'P3';
+  assignee?: User;
+  team: User[];
+  reporter: User;
+  dueDate: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Doc {
   id: string;
   prgId: string;
@@ -92,11 +125,6 @@ export interface Doc {
   addedBy: User;
   addedAt: string;
   category: string;
-}
-
-export interface GatePhase {
-  ph: string;
-  items: string[];
 }
 
 export interface ImplTask {
@@ -136,6 +164,7 @@ export interface KeyIssue {
   id: string;
   text: string;       // Brief, actionable text
   sev: 'C'|'H'|'M';  // Critical / High / Medium
+  milestone?: string; // associated milestone name
   by: string;         // editor initials or user id
   dt: string;         // date added
   res?: boolean;      // resolved flag

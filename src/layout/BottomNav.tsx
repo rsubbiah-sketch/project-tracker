@@ -24,13 +24,13 @@ export default function BottomNav({ mob, view, goTo, bottomNav, setSidebarOpen }
         <button key={ni.id} onClick={() => goTo(ni.id)}
           className="flex flex-col items-center gap-1 py-2 px-3 bg-transparent border-none cursor-pointer">
           <Icon name={ni.icon} size={20} color={view === ni.id ? accentText : 'var(--muted-foreground)'} />
-          <span className="font-medium text-[10px]" style={{ color: view === ni.id ? accentText : 'var(--muted-foreground)' }}>{ni.label}</span>
+          <span className="font-medium text-xs" style={{ color: view === ni.id ? accentText : 'var(--muted-foreground)' }}>{ni.label}</span>
         </button>
       ))}
       <button onClick={() => setSidebarOpen(true)}
         className="flex flex-col items-center gap-1 py-2 px-3 bg-transparent border-none cursor-pointer">
         <Icon name="list" size={20} color="var(--muted-foreground)" />
-        <span className="font-medium text-[10px] text-muted-foreground">More</span>
+        <span className="font-medium text-xs text-muted-foreground">More</span>
       </button>
     </div>
   );

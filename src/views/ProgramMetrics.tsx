@@ -13,17 +13,17 @@ interface MetricDim {
 interface ProgramMetrics {
   id?: string;
   programId: string;
-  schedule: MetricDim;
-  budget: MetricDim;
-  risk: MetricDim;
+  technology: MetricDim;
+  execution: MetricDim;
+  timeToMarket: MetricDim;
   composite: number | null;
   updatedByName?: string;
 }
 
-const DIMS: { key: 'schedule' | 'budget' | 'risk'; label: string; icon: string }[] = [
-  { key: 'schedule', label: 'Schedule', icon: 'calendar' },
-  { key: 'budget',   label: 'Budget',   icon: 'dollar' },
-  { key: 'risk',     label: 'Technical Risk', icon: 'alert' },
+const DIMS: { key: 'technology' | 'execution' | 'timeToMarket'; label: string; icon: string }[] = [
+  { key: 'technology',   label: 'Product Readiness', icon: 'shield' },
+  { key: 'execution',    label: 'Execution',       icon: 'clipboard' },
+  { key: 'timeToMarket', label: 'Time to Market',  icon: 'calendar' },
 ];
 
 const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8080/api';
@@ -40,18 +40,19 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
 
 const DEFAULT: ProgramMetrics = {
   programId: '',
-  schedule: { score: null, note: '' },
-  budget: { score: null, note: '' },
-  risk: { score: null, note: '' },
+  technology: { score: null, note: '' },
+  execution: { score: null, note: '' },
+  timeToMarket: { score: null, note: '' },
   composite: null,
 };
 
 interface Props {
   programId: string;
   isEditor: boolean;
+  onMetricsSaved?: () => void;
 }
 
-export default function ProgramMetrics({ programId, isEditor }: Props) {
+export default function ProgramMetrics({ programId, isEditor, onMetricsSaved }: Props) {
   const [metrics, setMetrics] = useState<ProgramMetrics>({ ...DEFAULT, programId });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<ProgramMetrics>({ ...DEFAULT, programId });
@@ -73,19 +74,20 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
       const result = await apiFetch<ProgramMetrics>(`/program-metrics/${programId}`, {
         method: 'PUT',
         body: JSON.stringify({
-          schedule: draft.schedule,
-          budget: draft.budget,
-          risk: draft.risk,
+          technology: draft.technology,
+          execution: draft.execution,
+          timeToMarket: draft.timeToMarket,
         }),
       });
       setMetrics(result);
       setDraft(result);
       setEditing(false);
+      onMetricsSaved?.();
     } catch {}
     setSaving(false);
   };
 
-  const updateDim = (key: 'schedule' | 'budget' | 'risk', field: 'score' | 'note', val: string) => {
+  const updateDim = (key: 'technology' | 'execution' | 'timeToMarket', field: 'score' | 'note', val: string) => {
     setDraft(prev => ({
       ...prev,
       [key]: {
@@ -95,7 +97,7 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
     }));
   };
 
-  const scores = [metrics.schedule.score, metrics.budget.score, metrics.risk.score].filter(s => s !== null) as number[];
+  const scores = [metrics.technology.score, metrics.execution.score, metrics.timeToMarket.score].filter(s => s !== null) as number[];
   const composite = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
 
   if (loading) return null;
@@ -107,7 +109,7 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
           <I name="activity" size={16} color="var(--foreground)" />
           <span className="text-sm font-bold text-foreground">Health Metrics</span>
           {composite !== null && (
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold" style={{ background: `${healthColor(composite)}18`, color: healthColor(composite) }}>
+            <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ background: `${healthColor(composite)}18`, color: healthColor(composite) }}>
               {composite}/100
             </span>
           )}
@@ -128,7 +130,7 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
             const val = metrics[dim.key];
             const score = val.score;
             const color = score !== null ? healthColor(score) : 'var(--muted-foreground)';
-            const ragLabel = score === null ? '—' : score >= 75 ? 'GREEN' : score >= 50 ? 'AMBER' : 'RED';
+            const ragLabel = score === null ? '—' : score >= 90 ? 'GREEN' : score >= 70 ? 'AMBER' : 'RED';
             return (
               <div key={dim.key} className="p-3 rounded-xl bg-muted border border-border">
                 <div className="flex items-center gap-2 mb-1">
@@ -137,7 +139,7 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
                   {score !== null && (
                     <>
                       <span className="text-sm font-black" style={{ color }}>{score}</span>
-                      <span className="text-[9px] font-bold px-2 py-0.5 rounded-full" style={{ background: `${color}18`, color, minWidth: 48, textAlign: 'center' }}>{ragLabel}</span>
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{ background: `${color}18`, color, minWidth: 48, textAlign: 'center' }}>{ragLabel}</span>
                     </>
                   )}
                   {score === null && <span className="text-xs text-muted-foreground">Not set</span>}
@@ -147,7 +149,7 @@ export default function ProgramMetrics({ programId, isEditor }: Props) {
             );
           })}
           {metrics.updatedByName && (
-            <div className="text-[10px] text-muted-foreground text-right">Last updated by {metrics.updatedByName}</div>
+            <div className="text-xs text-muted-foreground text-right">Last updated by {metrics.updatedByName}</div>
           )}
         </div>
       )}

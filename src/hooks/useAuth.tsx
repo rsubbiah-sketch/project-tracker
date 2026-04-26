@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, type React
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080/api';
 const AUTH_BASE = API_BASE.replace(/\/api\/?$/, '');
+const IS_DEV = import.meta.env.VITE_APP_ENV === 'development' || import.meta.env.VITE_APP_ENV === 'qa' || import.meta.env.DEV;
 
 interface AuthUser {
   id: string;
@@ -50,6 +51,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Fetch user profile when token is available
   useEffect(() => {
+    // Dev/QA mode: auto-authenticate without Google OAuth
+    if (IS_DEV && !token) {
+      const devToken = 'dev-bypass-token';
+      localStorage.setItem('auth_token', devToken);
+      setToken(devToken);
+      setUser({ id: 'rsubbiah', name: 'Rajendran Subbiah', email: 'rsubbiah@upscaleai.com', role: 'admin' });
+      setLoading(false);
+      return;
+    }
+
     if (!token) {
       setLoading(false);
       return;
@@ -63,13 +74,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (res.ok) {
           const data = await res.json();
           setUser(data);
+        } else if (IS_DEV) {
+          // Dev mode: backend rejected token but keep going
+          setUser({ id: 'rsubbiah', name: 'Rajendran Subbiah', email: 'rsubbiah@upscaleai.com', role: 'admin' });
         } else {
           // Token invalid/expired
           localStorage.removeItem('auth_token');
           setToken(null);
         }
       } catch {
-        // API unavailable — keep token, user stays null
+        // API unavailable
+        if (IS_DEV) {
+          setUser({ id: 'rsubbiah', name: 'Rajendran Subbiah', email: 'rsubbiah@upscaleai.com', role: 'admin' });
+        }
       } finally {
         setLoading(false);
       }

@@ -32,6 +32,8 @@ const ICON_PATHS: Record<string, string[]> = {
   file:     ['M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z','M13 2v7h7'],
   sheet:    ['M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z','M14 2v6h6','M8 13h8','M8 17h8','M8 9h2'],
   trash:    ['M3 6h18','M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2'],
+  more:     ['M12 13a1 1 0 100-2 1 1 0 000 2z','M19 13a1 1 0 100-2 1 1 0 000 2z','M5 13a1 1 0 100-2 1 1 0 000 2z'],
+  edit:     ['M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7','M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z'],
 };
 
 interface IconProps extends React.SVGProps<SVGSVGElement> {

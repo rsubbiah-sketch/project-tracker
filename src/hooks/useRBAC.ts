@@ -21,7 +21,13 @@ export const PERMISSIONS = {
   'program.create': 'editor',
   'program.edit': 'editor',
   'program.delete': 'admin',
-  'program.activate': 'editor',
+
+  // Milestones
+  'milestone.view': 'viewer',
+  'milestone.add': 'editor',
+  'milestone.edit.own': 'commenter',
+  'milestone.edit.any': 'editor',
+  'milestone.delete': 'editor',
 
   // Tasks
   'task.view': 'viewer',
@@ -30,11 +36,6 @@ export const PERMISSIONS = {
   'task.edit.any': 'editor',
   'task.delete': 'editor',
   'task.reassign': 'editor',
-
-  // Gate Reviews
-  'gate.view': 'viewer',
-  'gate.update': 'commenter',
-  'gate.approve': 'editor',
 
   // Documents
   'doc.view': 'viewer',
@@ -47,16 +48,17 @@ export const PERMISSIONS = {
   'comment.delete.own': 'commenter',
   'comment.delete.any': 'admin',
 
-  // Admin
+  // Admin & Teams
   'admin.view': 'admin',
   'admin.manage_users': 'admin',
+  'admin.manage_teams': 'admin',
   'admin.view_audit': 'admin',
-  'admin.manage_roles': 'admin',
 } as const;
 
 export type Permission = keyof typeof PERMISSIONS;
 
-function getRank(role: string): number {
+function getRank(role: string | undefined | null): number {
+  if (!role) return 0;
   return ROLE_RANK[role.toLowerCase()] ?? 0;
 }
 
@@ -76,6 +78,16 @@ export function hasPermission(userRole: string, permission: Permission): boolean
 }
 
 /**
+ * Users allowed to create programs (program-admin).
+ * Identified by name — admins always have this right.
+ */
+const PROGRAM_ADMINS = [
+  'Julissa Benavente',
+  'Rajendran Subbiah',
+  'Aravind Srikumar',
+];
+
+/**
  * React hook that provides RBAC utilities for the current user.
  */
 export function useRBAC() {
@@ -88,6 +100,7 @@ export function useRBAC() {
     isEditor: hasMinRole(role, 'editor'),
     isCommenter: hasMinRole(role, 'commenter'),
     isViewer: true, // everyone is at least a viewer
+    isProgramAdmin: role === 'admin' || PROGRAM_ADMINS.includes(user.name),
     can: (permission: Permission) => hasPermission(role, permission),
     hasMinRole: (minRole: string) => hasMinRole(role, minRole),
     rank: getRank(role),

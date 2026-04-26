@@ -83,9 +83,9 @@ describe('RBAC utilities', () => {
       expect(hasPermission('admin', 'admin.manage_users')).toBe(true);
     });
 
-    it('editor can approve gates', () => {
-      expect(hasPermission('editor', 'gate.approve')).toBe(true);
-      expect(hasPermission('commenter', 'gate.approve')).toBe(false);
+    it('editor can add milestones', () => {
+      expect(hasPermission('editor', 'milestone.add')).toBe(true);
+      expect(hasPermission('commenter', 'milestone.add')).toBe(false);
     });
 
     it('commenter can link documents', () => {
@@ -103,7 +103,7 @@ describe('RBAC utilities', () => {
       expect(keys).toContain('program.delete');
       expect(keys).toContain('task.view');
       expect(keys).toContain('task.create');
-      expect(keys).toContain('gate.approve');
+      expect(keys).toContain('milestone.add');
       expect(keys).toContain('comment.create');
       expect(keys).toContain('admin.view');
     });

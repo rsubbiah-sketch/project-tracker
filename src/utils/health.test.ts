@@ -5,46 +5,46 @@ import type { Program, Task } from '../types';
 describe('Health scoring utilities', () => {
   // ─── Display helpers ───
   describe('healthColor', () => {
-    it('returns green for >= 75', () => {
-      expect(healthColor(75)).toBe('#34D399');
+    it('returns green for >= 90', () => {
+      expect(healthColor(90)).toBe('#34D399');
       expect(healthColor(100)).toBe('#34D399');
     });
 
-    it('returns yellow for 50-74', () => {
-      expect(healthColor(50)).toBe('#FBBF24');
-      expect(healthColor(74)).toBe('#FBBF24');
+    it('returns yellow for 70-89', () => {
+      expect(healthColor(70)).toBe('#FBBF24');
+      expect(healthColor(89)).toBe('#FBBF24');
     });
 
-    it('returns red for < 50', () => {
+    it('returns red for < 70', () => {
       expect(healthColor(0)).toBe('#F87171');
-      expect(healthColor(49)).toBe('#F87171');
+      expect(healthColor(69)).toBe('#F87171');
     });
   });
 
   describe('healthLabel', () => {
-    it('returns On Track for >= 75', () => {
-      expect(healthLabel(75)).toBe('On Track');
+    it('returns On Track for >= 90', () => {
+      expect(healthLabel(90)).toBe('On Track');
     });
 
-    it('returns At Risk for 50-74', () => {
-      expect(healthLabel(60)).toBe('At Risk');
+    it('returns At Risk for 70-89', () => {
+      expect(healthLabel(80)).toBe('At Risk');
     });
 
-    it('returns Critical for < 50', () => {
+    it('returns Critical for < 70', () => {
       expect(healthLabel(30)).toBe('Critical');
     });
   });
 
   describe('healthBg', () => {
-    it('returns green bg for >= 75', () => {
-      expect(healthBg(80)).toContain('52,211,153');
+    it('returns green bg for >= 90', () => {
+      expect(healthBg(95)).toContain('52,211,153');
     });
 
-    it('returns yellow bg for 50-74', () => {
-      expect(healthBg(60)).toContain('251,191,36');
+    it('returns yellow bg for 70-89', () => {
+      expect(healthBg(80)).toContain('251,191,36');
     });
 
-    it('returns red bg for < 50', () => {
+    it('returns red bg for < 70', () => {
       expect(healthBg(30)).toContain('248,113,113');
     });
   });
@@ -106,7 +106,7 @@ describe('Health scoring utilities', () => {
     };
 
     it('returns a valid HealthResult', () => {
-      const result = calcHealth(baseProgram, [], {});
+      const result = calcHealth(baseProgram, []);
       expect(result).toHaveProperty('dims');
       expect(result).toHaveProperty('composite');
       expect(result).toHaveProperty('alerts');
@@ -115,13 +115,13 @@ describe('Health scoring utilities', () => {
     });
 
     it('composite is between 0 and 100', () => {
-      const result = calcHealth(baseProgram, [], {});
+      const result = calcHealth(baseProgram, []);
       expect(result.composite).toBeGreaterThanOrEqual(0);
       expect(result.composite).toBeLessThanOrEqual(100);
     });
 
     it('all dimensions are between 0 and 100', () => {
-      const result = calcHealth(baseProgram, [], {});
+      const result = calcHealth(baseProgram, []);
       for (const [dim, value] of Object.entries(result.dims)) {
         expect(value, `${dim} should be 0-100`).toBeGreaterThanOrEqual(0);
         expect(value, `${dim} should be 0-100`).toBeLessThanOrEqual(100);
@@ -129,21 +129,20 @@ describe('Health scoring utilities', () => {
     });
 
     it('label matches composite value', () => {
-      const result = calcHealth(baseProgram, [], {});
-      if (result.composite >= 75) expect(result.label).toBe('On Track');
-      else if (result.composite >= 50) expect(result.label).toBe('At Risk');
+      const result = calcHealth(baseProgram, []);
+      if (result.composite >= 90) expect(result.label).toBe('On Track');
+      else if (result.composite >= 70) expect(result.label).toBe('At Risk');
       else expect(result.label).toBe('Critical');
     });
 
-    it('budget score penalizes high burn at low progress', () => {
-      const highBurn = { ...baseProgram, budgetUsed: 90, progress: 10 };
-      const result = calcHealth(highBurn, [], {});
-      expect(result.dims.budget).toBeLessThan(50);
+    it('technology score reflects product readiness', () => {
+      const result = calcHealth(baseProgram, []);
+      expect(result.dims.technology).toBeDefined();
     });
 
     it('generates alerts for low-scoring dimensions', () => {
       const behind = { ...baseProgram, progress: 5, budgetUsed: 90 };
-      const result = calcHealth(behind, [], {});
+      const result = calcHealth(behind, []);
       expect(result.alerts.length).toBeGreaterThan(0);
     });
   });

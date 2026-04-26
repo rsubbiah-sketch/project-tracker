@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { n, g, u, ST, PROGRAM_TYPES, PROGRAM_PHASES, PHASE_COLOR, PHASE_LISTS } from './tokens';
+import { n, g, u, ST, PROGRAM_TYPES, PROGRAM_PHASES, PHASE_COLOR } from './tokens';
 
 describe('Design tokens', () => {
   // ─── Color palettes ───
@@ -82,31 +82,4 @@ describe('Design tokens', () => {
     });
   });
 
-  // ─── Phase lists ───
-  describe('PHASE_LISTS', () => {
-    it('has gate phase lists for ASIC, Hardware, Software', () => {
-      expect(PHASE_LISTS.ASIC).toBeDefined();
-      expect(PHASE_LISTS.Hardware).toBeDefined();
-      expect(PHASE_LISTS.Software).toBeDefined();
-    });
-
-    it('has shorthand aliases HW and SW', () => {
-      expect(PHASE_LISTS.HW).toBeDefined();
-      expect(PHASE_LISTS.SW).toBeDefined();
-    });
-
-    it('each list has at least 5 phases', () => {
-      for (const [key, phases] of Object.entries(PHASE_LISTS)) {
-        expect(phases.length, `${key} should have >= 5 phases`).toBeGreaterThanOrEqual(5);
-      }
-    });
-
-    it('no undefined values in any list', () => {
-      for (const [key, phases] of Object.entries(PHASE_LISTS)) {
-        for (const phase of phases) {
-          expect(phase, `${key} has undefined phase`).toBeTruthy();
-        }
-      }
-    });
-  });
 });

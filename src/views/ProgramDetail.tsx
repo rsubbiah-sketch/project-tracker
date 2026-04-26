@@ -1,19 +1,42 @@
-import { useState } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Icon as I } from '../components/Icons';
-import { u, ST, PHASE_LISTS, accent, accentText, PROGRESS_COLOR } from '../tokens';
+import { u, g, ST, SIG, accent, accentText } from '../tokens';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { Av, SB, TB, PB, GB, Cd } from '../components/ui';
-import { USERS } from '../data';
+import { useUsers } from '../hooks/useUsers';
 import { useCurrentUser } from '../hooks/useCurrentUser';
 import { useProgramRole } from '../hooks/useProgramRole';
 import type { Program, Comment, Reply, Task, Doc } from '../types';
 import Comments from './Comments';
-import ProgramMetrics from './ProgramMetrics';
-import ProgramIssues from './ProgramIssues';
 import { HealthCard, emptyHealth } from '../components/Health';
-import { createTask as apiCreateTask, updateTask as apiUpdateTask, createDocument as apiCreateDocument, deleteDocument as apiDeleteDocument } from '../services/api';
-import { calcHealth, healthColor, healthLabel, healthBg, DIM_META, HEALTH_WEIGHTS } from '../utils/health';
+import { createTask as apiCreateTask, updateTask as apiUpdateTask, createDocument as apiCreateDocument, deleteDocument as apiDeleteDocument, updateProgram as apiUpdateProgram } from '../services/api';
+import { mapTask } from '../services/mappers';
+import { calcHealth, healthColor, healthLabel, healthBg, milestoneColor, DIM_META, HEALTH_WEIGHTS } from '../utils/health';
+import CreateTaskDialog from '../components/CreateTaskDialog';
+import TaskTable from '../components/TaskTable';
+import MilestoneTimeline from '../components/MilestoneTimeline';
+import TimelineView from './TimelineView';
+import { HealthLegend, CategoryBadge } from '../components/HealthLegend';
+
+function MilestoneScoreInput({ initial, onCommit }: { initial: number | undefined; onCommit: (n: number | undefined) => void }) {
+  const [val, setVal] = useState(initial != null ? String(initial) : '');
+  const parsed = val.trim() === '' ? undefined : Math.max(0, Math.min(100, parseInt(val) || 0));
+  const color = milestoneColor(parsed);
+  return (
+    <input
+      value={val}
+      onChange={e => setVal(e.target.value)}
+      onBlur={() => onCommit(parsed)}
+      onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      placeholder="0–100"
+      className="w-16 px-2 py-1.5 rounded text-sm text-center font-bold outline-none border border-border bg-background"
+      style={{ color }}
+      inputMode="numeric"
+      pattern="[0-9]*"
+    />
+  );
+}
 
 interface ProgramDetailProps {
   p: Program | undefined;
@@ -26,7 +49,6 @@ interface ProgramDetailProps {
   setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
   docs: Doc[];
   setDocs: React.Dispatch<React.SetStateAction<Doc[]>>;
-  gateSt?: Record<string, string>;
   back: () => void;
 }
 
@@ -38,431 +60,726 @@ const DOC_META: Record<Doc["type"], { icon: string; color: string; label: string
   link:  { icon: "link",  color: "var(--muted-foreground)", label: "Link" },
 };
 
-export default function ProgramDetail({ p, setPrg, com, setCom, rep, setRep, tasks, setTasks, docs, setDocs, gateSt = {}, back }: ProgramDetailProps) {
+/* ═══ DRAGGABLE TIMELINE COMPONENT ═══ */
+function DraggableTimeline({ phases, currentIndex, milestones, canEdit, onUpdate }: {
+  phases: string[];
+  currentIndex: number;
+  milestones: { name: string; date: string; status: string }[];
+  canEdit: boolean;
+  onUpdate: (newIndex: number) => void;
+}) {
+  const [todayIndex, setTodayIndex] = useState(currentIndex);
+  const [dragging, setDragging] = useState(false);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const nodeRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const dragStartIndex = useRef(todayIndex);
+
+  // Sync if parent changes currentIndex
+  useEffect(() => { setTodayIndex(currentIndex); }, [currentIndex]);
+
+  const getClosestIndex = useCallback((clientX: number) => {
+    let closest = 0, minDist = Infinity;
+    nodeRefs.current.forEach((el, i) => {
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const center = rect.left + rect.width / 2;
+      const dist = Math.abs(clientX - center);
+      if (dist < minDist) { minDist = dist; closest = i; }
+    });
+    return closest;
+  }, []);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (!canEdit) return;
+    e.preventDefault();
+    dragStartIndex.current = todayIndex;
+    setDragging(true);
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, [canEdit, todayIndex]);
+
+  const handlePointerMove = useCallback((e: PointerEvent) => {
+    if (!dragging) return;
+    setTodayIndex(getClosestIndex(e.clientX));
+  }, [dragging, getClosestIndex]);
+
+  const handlePointerUp = useCallback(() => {
+    if (!dragging) return;
+    setDragging(false);
+    setTodayIndex(current => {
+      if (current !== dragStartIndex.current) onUpdate(current);
+      return current;
+    });
+  }, [dragging, onUpdate]);
+
+  // Attach window-level listeners while dragging for smooth tracking
+  useEffect(() => {
+    if (dragging) {
+      window.addEventListener('pointermove', handlePointerMove);
+      window.addEventListener('pointerup', handlePointerUp);
+    }
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [dragging, handlePointerMove, handlePointerUp]);
+
+  const progressPct = phases.length > 1 ? (todayIndex / (phases.length - 1)) * 100 : 0;
+
+  return (
+    <div className="mb-6 select-none" ref={trackRef}>
+      {!canEdit && (
+        <div className="text-xs text-muted-foreground mb-2 italic">read-only — only admin &amp; editor can edit</div>
+      )}
+
+      <div className="relative" style={{ padding: '0 20px' }}>
+        {/* "Today" floating label */}
+        <div className="flex flex-col items-center absolute -top-6 transition-all duration-200 ease-out pointer-events-none"
+          style={{ left: `${progressPct}%`, transform: 'translateX(-50%)' }}>
+          <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Today</span>
+          <svg width="10" height="6" viewBox="0 0 10 6" className="mt-0.5">
+            <polygon points="5,6 0,0 10,0" fill="var(--muted-foreground)" />
+          </svg>
+        </div>
+
+        {/* Track line (background) */}
+        <div className="absolute left-5 right-5 h-[3px] rounded-full bg-border" style={{ top: 20 }} />
+        {/* Track line (filled / completed) */}
+        <div className="absolute left-5 h-[3px] rounded-full transition-all duration-200 ease-out"
+          style={{ top: 20, width: `calc(${progressPct}% - ${progressPct > 0 ? 0 : 20}px)`, background: '#3B82F6', maxWidth: 'calc(100% - 40px)' }} />
+
+        {/* Phase nodes */}
+        <div className="relative flex justify-between" style={{ paddingTop: 8 }}>
+          {phases.map((ph, i) => {
+            const isCompleted = i < todayIndex;
+            const isCurrent = i === todayIndex;
+            const isFuture = i > todayIndex;
+            const msForPhase = milestones.find(m => m.name.toLowerCase().includes(ph.toLowerCase().slice(0, 4)));
+
+            return (
+              <div key={i} className="flex flex-col items-center" style={{ flex: 1 }}
+                ref={el => { nodeRefs.current[i] = el; }}>
+                {/* Circle */}
+                <div
+                  onPointerDown={isCurrent ? handlePointerDown : undefined}
+                  className={`
+                    w-7 h-7 rounded-full flex items-center justify-center relative z-10
+                    border-2 transition-all duration-200 ease-out
+                    ${isCompleted
+                      ? 'bg-[#3B82F6] border-[#3B82F6]'
+                      : isCurrent && canEdit
+                        ? 'bg-background border-[#3B82F6] shadow-lg cursor-grab active:cursor-grabbing ring-4 ring-blue-500/20'
+                        : isCurrent
+                          ? 'bg-background border-[#3B82F6] shadow-md'
+                          : 'bg-background border-border'
+                    }
+                  `}
+                  style={{ touchAction: 'none' }}
+                >
+                  {isCompleted ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  ) : isCurrent ? (
+                    <div className="w-2.5 h-2.5 rounded-full bg-[#3B82F6]" />
+                  ) : (
+                    <div className="w-2 h-2 rounded-full bg-border" />
+                  )}
+                </div>
+
+                {/* Label */}
+                <span className={`
+                  mt-2 text-xs font-bold text-center whitespace-nowrap
+                  ${isCompleted ? 'text-[#3B82F6]' : isCurrent ? 'text-foreground font-extrabold' : 'text-muted-foreground'}
+                `}>
+                  {ph}
+                </span>
+
+                {/* Milestone date */}
+                {msForPhase?.date && (
+                  <div className={`text-xs mt-0.5 ${isCurrent ? 'font-bold text-[#3B82F6]' : 'text-muted-foreground'}`}>
+                    {new Date(msForPhase.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {canEdit && (
+        <div className="mt-2 text-xs text-muted-foreground text-center italic">
+          Drag the highlighted circle to move current phase
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ProgramDetail({ p, setPrg, com, setCom, rep, setRep, tasks, setTasks, docs, setDocs, back }: ProgramDetailProps) {
   const ME = useCurrentUser();
+  const USERS = useUsers();
   const mob=useIsMobile();
   const pRole = useProgramRole(p?.id);
   if(!p)return null;
   const prgTasks=tasks.filter(t=>t.prgId===p.id);
   const[showNewTask,setShowNewTask]=useState(false);
-  const[newTask,setNewTask]=useState({title:"",assignee:USERS[0].id,priority:"P1",due:"",desc:""});
-  const[editingMs,setEditingMs]=useState<number|null>(null);
+  const[expandedTask,setExpandedTask]=useState<string|null>(null);
+  const[editingTask,setEditingTask]=useState<any>(null);
+  // insertAt: -1 = hidden, >= 0 = insert after that index, Infinity = append at end
+  const[insertAt,setInsertAt]=useState<number>(-1);
+  const[newMsForm,setNewMsForm]=useState({name:'',date:'',owner:'',keyIssue:'',tech:'G' as 'G'|'A'|'R',exec:'G' as 'G'|'A'|'R',ttm:'G' as 'G'|'A'|'R',category:'product' as 'product'|'execution'|'ttm'});
+  const resetAddForm = () => { setInsertAt(-1); setNewMsForm({ name: '', date: '', owner: '', keyIssue: '', tech: 'G', exec: 'G', ttm: 'G', category: 'product' }); };
+  const[detailTab,setDetailTab]=useState<"overview"|"milestones"|"timeline">("overview");
+  const[msMenuOpen,setMsMenuOpen]=useState<number|null>(null);
+  const[msEditing,setMsEditing]=useState<number|null>(null);
+  const[ctxMenu,setCtxMenu]=useState<{x:number;y:number;idx:number}|null>(null);
+  // Snapshot of milestones before editing — used for "previous value" display and reset
+  const[msSnapshot,setMsSnapshot]=useState<typeof p.milestones|null>(null);
+  // Take snapshot when milestones tab is opened (so Reset is always available)
+  useEffect(() => {
+    if (detailTab === 'milestones' && msSnapshot === null) {
+      setMsSnapshot(JSON.parse(JSON.stringify(p.milestones || [])));
+    }
+    if (detailTab !== 'milestones') {
+      setMsSnapshot(null);
+      setMsEditing(null);
+    }
+  }, [detailTab]);
+  const startEditing = (idx: number) => {
+    if (msSnapshot === null) setMsSnapshot(JSON.parse(JSON.stringify(p.milestones || [])));
+    setMsEditing(idx);
+  };
+  const resetMilestone = (idx: number) => {
+    if (!msSnapshot || !msSnapshot[idx]) return;
+    const orig = msSnapshot[idx];
+    savePrg(pr => ({ ...pr, milestones: (pr.milestones || []).map((m, j) => j === idx ? { ...orig } : m), lastUpdate: new Date().toISOString() }));
+    setMsEditing(null);
+  };
+  const resetAllMilestones = () => {
+    if (!msSnapshot) return;
+    savePrg(pr => ({ ...pr, milestones: JSON.parse(JSON.stringify(msSnapshot)), lastUpdate: new Date().toISOString() }));
+    setMsSnapshot(null);
+    setMsEditing(null);
+  };
+  const msMenuRef=useRef<HTMLDivElement|null>(null);
+  const ctxMenuRef=useRef<HTMLDivElement|null>(null);
 
-  /* Update a milestone field on the parent program */
-  const updateMilestone = (idx: number, patch: Partial<{name:string;date:string;status:'pending'|'done';owner:string;keyIssue:string}>) => {
-    setPrg(prev => prev.map(prg => prg.id === p.id
-      ? { ...prg, milestones: (prg.milestones || []).map((m, i) => i === idx ? { ...m, ...patch } : m), lastUpdate: new Date().toISOString() }
-      : prg
-    ));
-    setEditingMs(null);
+  // Close milestone menus on outside click
+  useEffect(()=>{
+    const h=(e:MouseEvent)=>{
+      if(msMenuRef.current&&!msMenuRef.current.contains(e.target as Node))setMsMenuOpen(null);
+      if(ctxMenuRef.current&&!ctxMenuRef.current.contains(e.target as Node))setCtxMenu(null);
+    };
+    document.addEventListener('mousedown',h);
+    return()=>document.removeEventListener('mousedown',h);
+  },[]);
+
+  /* ═══ PERSIST PROGRAM CHANGES ═══ */
+  const savePrg = (updater: (pr: Program) => Program) => {
+    setPrg(prev => prev.map(pr => {
+      if (pr.id !== p.id) return pr;
+      const updated = updater(pr);
+      const diff: Record<string, any> = {};
+      for (const k of ['milestones', 'health', 'issues', 'progress', 'description', 'deliveryAsk', 'deliveryCommit', 'name', 'mode', 'lastUpdate', 'team', 'budget', 'spark'] as const) {
+        if ((updated as any)[k] !== (pr as any)[k]) diff[k] = (updated as any)[k];
+      }
+      if (Object.keys(diff).length) {
+        apiUpdateProgram(p.id, diff).catch(err => {
+          console.error('Failed to save program changes:', err);
+        });
+      }
+      return updated;
+    }));
   };
 
-  const h = calcHealth(p, tasks, gateSt);
+  /* ═══ OWNERSHIP FLAGS ═══ */
+  const isProgramOwner = ME.id === p.owner.id || ME.name === p.owner.name || pRole.isAdmin;
+
+  const h = calcHealth(p, tasks);
   const w = HEALTH_WEIGHTS[p.type] || HEALTH_WEIGHTS.HW;
-  const progressColor = PROGRESS_COLOR[p.currentPhase] || "#3B82F6";
+
   return(<motion.div initial={{opacity:0,x:20}} animate={{opacity:1,x:0}} exit={{opacity:0,x:-20}}>
-    <motion.button whileHover={{x:-3}} whileTap={{scale:.95}} onClick={back} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold mb-5 bg-card border border-border cursor-pointer" style={{color:'#2563EB'}}><I name="back" size={14} color={'#2563EB'}/>Back</motion.button>
-    <Cd delay={0} hover={false} className="p-5 md:p-6 mb-5">
+    <div id="program-tabs" className="sticky top-0 z-20 flex items-center gap-4 mb-4 flex-wrap py-3 -mx-4 px-4 md:-mx-6 md:px-6 backdrop-blur-xl" style={{ background: 'hsl(var(--background) / 0.85)' }}>
+      <button onClick={back} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium border border-border bg-background hover:bg-muted hover:text-foreground transition-colors cursor-pointer"><I name="back" size={14} color="currentColor"/>Back</button>
+      <div className="inline-flex h-9 items-center justify-center rounded-lg bg-muted p-[3px] text-muted-foreground overflow-x-auto">
+        {([
+          {id:"overview" as const,label:"Overview",icon:"folder"},
+          {id:"milestones" as const,label:"Milestones",icon:"flag"},
+          {id:"timeline" as const,label:"NPI Timeline",icon:"calendar"},
+        ]).map(tab=>{
+          const active=detailTab===tab.id;
+          const count = tab.id==="milestones"?(p.milestones||[]).length : 0;
+          return(
+            <button key={tab.id} onClick={()=>{ setDetailTab(tab.id); document.getElementById('program-tabs')?.scrollIntoView({ behavior: 'smooth' }); }}
+              data-state={active?'active':'inactive'}
+              className={`inline-flex items-center justify-center gap-1.5 h-[calc(100%-1px)] px-3 rounded-md border border-transparent text-sm font-medium cursor-pointer whitespace-nowrap flex-shrink-0 transition-[color,background-color,box-shadow] ${active?'bg-background text-foreground shadow-sm':'text-muted-foreground hover:text-foreground hover:bg-background/50'}`}>
+              <I name={tab.icon} size={12} color="currentColor"/>{tab.label}
+              {count>0&&<span className={`ml-0.5 inline-flex items-center justify-center rounded-md px-1.5 text-xs font-semibold ${active?'bg-muted text-foreground':'bg-muted-foreground/20 text-muted-foreground'}`}>{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
 
-      {/* ═══ NARRATIVE HEADLINE ═══ */}
-      {(() => {
-        const displayLabel = h.label;
-        const worstDim = Object.entries(h.dims).reduce((a, b) => a[1] < b[1] ? a : b);
-        const worstName = DIM_META[worstDim[0]]?.label || worstDim[0];
-        const headline = h.composite >= 75
-          ? `${p.name} is On Track; all dimensions healthy`
-          : h.composite >= 50
-            ? `${p.name} remains ${displayLabel}; ${worstName.toLowerCase()} is the primary concern${p.deliveryCommit ? ` while ${new Date(p.deliveryCommit).toLocaleDateString('en-US',{month:'short',year:'numeric'})} delivery remains protected` : ''}`
-            : `${p.name} is Critical; ${worstName.toLowerCase()} requires immediate attention`;
+    {detailTab==="timeline" && <TimelineView p={p} />}
+
+    {detailTab==="overview" && <>
+    {/* ═══ HEALTH SUMMARY BAR ═══ */}
+    <div className={`grid ${mob ? 'grid-cols-2' : 'grid-cols-5'} gap-4 mb-5`}>
+      {/* Health Score */}
+      <Cd delay={0} hover={false} className="p-5">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-muted-foreground">Health</span>
+          <I name="activity" size={16} color="var(--muted-foreground)" />
+        </div>
+        <div className="text-3xl font-bold tracking-tight tabular-nums" style={{ color: h.composite < 60 ? '#F87171' : h.color }}>{h.composite}</div>
+        <span className="inline-flex items-center mt-1 px-2 py-0.5 rounded-full text-xs font-semibold" style={{ background: healthBg(h.composite), color: h.composite < 60 ? '#F87171' : h.color, border: `1px solid ${h.composite < 60 ? '#F8717133' : h.color + '33'}` }}>
+          {h.label}
+        </span>
+      </Cd>
+      {/* Dimension scores */}
+      {Object.entries(h.dims).map(([key, val]) => {
+        const meta = DIM_META[key]; const c = val < 60 ? '#F87171' : healthColor(val);
         return (
-          <>
-            <h2 className="text-lg md:text-xl font-black tracking-tight text-foreground leading-snug mb-1">{headline}</h2>
-            <p className="text-xs text-muted-foreground mb-5">{p.type} program | milestone-led executive dashboard</p>
-          </>
+          <Cd key={key} delay={0.04} hover={false} className="p-5">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-muted-foreground">{meta.label}</span>
+              <I name={meta.icon} size={16} color="var(--muted-foreground)" />
+            </div>
+            <div className="text-3xl font-bold tracking-tight tabular-nums" style={{ color: c }}>{val}</div>
+            <span className="text-xs text-muted-foreground mt-1">{healthLabel(val)}</span>
+          </Cd>
         );
-      })()}
+      })}
+      {/* Last Updated */}
+      <Cd delay={0.12} hover={false} className="p-5">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-muted-foreground">Last Updated</span>
+          <I name="calendar" size={16} color="var(--muted-foreground)" />
+        </div>
+        <div className="text-lg font-bold tracking-tight text-foreground">
+          {p.lastUpdate ? new Date(p.lastUpdate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+        </div>
+        <span className="text-xs text-muted-foreground mt-1">
+          {p.lastUpdate ? new Date(p.lastUpdate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : ''}
+        </span>
+      </Cd>
+    </div>
 
-      {/* ═══ TWO-COLUMN: TIMELINE + STATUS PANEL ═══ */}
-      <div className={`flex ${mob ? 'flex-col' : 'flex-row'} gap-5`}>
-
-        {/* LEFT: Phase timeline + milestones table */}
-        <div className="flex-1 min-w-0">
-
-          {/* Phase timeline */}
+    {/* ═══ PROGRAM INFO ═══ */}
+    <div className={`flex ${mob ? 'flex-col' : 'flex-row'} gap-5 mb-5`}>
+      <Cd delay={0.05} hover={false} className="p-5 md:p-6 flex-1 min-w-0">
+        <p className="text-xs text-muted-foreground mb-4">{p.type} program | milestone-led executive dashboard</p>
+        <div className="mt-1 pt-3 border-t border-border">
           {(() => {
-            const phaseKey = p.type === 'HW' ? 'Hardware' : p.type === 'SW' ? 'Software' : 'Hardware';
-            const phases = PHASE_LISTS[phaseKey] || PHASE_LISTS['Hardware'] || [];
-            const currentIdx = phases.indexOf(p.phase || p.currentPhase || '');
-            const now = new Date();
-            const start = p.assignedDate ? new Date(p.assignedDate) : now;
-            const end = p.deliveryCommit ? new Date(p.deliveryCommit) : (p.deliveryAsk ? new Date(p.deliveryAsk) : now);
-            const elapsed = end > start ? Math.max(0, Math.min(1, (now.getTime() - start.getTime()) / (end.getTime() - start.getTime()))) : 0;
-            const todayIdx = Math.min(Math.floor(elapsed * phases.length), phases.length - 1);
-
+            const fmtD = (d: string) => d ? new Date(d + (d.includes('T') ? '' : 'T00:00:00')).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+            type InfoItem = { l: string; v: string; color?: string; bg?: string };
+            const items: InfoItem[] = [
+              { l: "Owner", v: p.owner.name },
+              { l: "Phase", v: p.currentPhase || '—' },
+              { l: "Delivery ASK", v: fmtD(p.deliveryAsk) },
+              { l: "Delivery Commit", v: fmtD(p.deliveryCommit) },
+              { l: "Progress", v: `${p.progress}%` },
+            ];
             return (
-              <div className="mb-6">
-                {/* Today marker */}
-                <div className="relative mb-1" style={{ paddingLeft: `${Math.max(4, todayIdx / Math.max(phases.length - 1, 1) * 85)}%` }}>
-                  <span className="text-[9px] font-bold text-muted-foreground">Today</span>
-                  <div className="absolute bottom-0 left-0 w-0 h-0" style={{ marginLeft: `${Math.max(4, todayIdx / Math.max(phases.length - 1, 1) * 85)}%`, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderTop: '5px solid var(--muted-foreground)' }} />
-                </div>
-
-                {/* Connector line */}
-                <div className="relative">
-                  <div className="absolute top-3 left-0 right-0 h-[2px] bg-border" />
-
-                  {/* Phase dots */}
-                  <div className="flex justify-between relative">
-                    {phases.map((ph, i) => {
-                      const done = i < currentIdx;
-                      const current = i === currentIdx;
-                      const future = i > currentIdx;
-                      const dotColor = done ? '#34D399' : current ? '#FBBF24' : 'var(--border)';
-                      const dotBorder = done ? '#34D399' : current ? '#FBBF24' : 'var(--border)';
-                      const msForPhase = (p.milestones || []).find(m => m.name.toLowerCase().includes(ph.toLowerCase().slice(0, 4)));
-
-                      return (
-                        <div key={i} className="flex flex-col items-center" style={{ flex: 1 }}>
-                          <div className="w-6 h-6 rounded-full flex items-center justify-center relative z-10" style={{
-                            background: done ? dotColor : future ? 'var(--background)' : 'var(--background)',
-                            border: `2.5px solid ${dotBorder}`,
-                          }}>
-                            {done && <I name="check" size={11} color="#fff" />}
-                            {current && <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#FBBF24' }} />}
-                          </div>
-                          <div className={`text-[10px] font-bold mt-1.5 text-center ${future ? 'text-muted-foreground' : 'text-foreground'}`}>{ph}</div>
-                          {msForPhase?.date && <div className={`text-[9px] ${current ? 'font-bold' : ''}`} style={{ color: current ? '#FBBF24' : 'var(--muted-foreground)' }}>{new Date(msForPhase.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</div>}
-                        </div>
-                      );
-                    })}
+              <div className={`flex ${mob ? 'flex-col gap-3' : 'flex-row flex-wrap items-center gap-6'}`}>
+                {items.map((d, i) => (
+                  <div key={i} className="flex flex-col gap-0.5 min-w-0">
+                    <span className="text-xs font-medium text-muted-foreground">{d.l}</span>
+                    <span className="text-sm font-semibold text-foreground truncate">{d.v}</span>
                   </div>
-                </div>
+                ))}
               </div>
             );
           })()}
+        </div>
+        {/* Alerts */}
+        {h.alerts.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-border space-y-1.5">
+            {h.alerts.map((a, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <I name="alert" size={12} color="#F87171" />
+                <span className="text-muted-foreground">{a}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Cd>
+    </div>
 
-          {/* Critical milestones table */}
-          <div className="mb-2">
-            <div className="text-xs font-bold text-foreground mb-2">Critical milestones</div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
-                <thead>
-                  <tr className="border-b-2 border-border">
-                    <th className="text-left py-2 pr-3 font-semibold text-muted-foreground">Milestone</th>
-                    <th className="text-left py-2 px-2 font-semibold text-muted-foreground">Date</th>
-                    <th className="text-left py-2 px-2 font-semibold text-muted-foreground">Owner</th>
-                    <th className="text-center py-2 px-1 font-semibold text-muted-foreground" title="Technology risk">Tech</th>
-                    <th className="text-center py-2 px-1 font-semibold text-muted-foreground" title="Execution risk">Exec</th>
-                    <th className="text-center py-2 px-1 font-semibold text-muted-foreground" title="Time-to-market risk">TTM</th>
-                    <th className="text-left py-2 pl-2 font-semibold text-muted-foreground">Key issue</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(p.milestones || []).map((ms, i) => {
-                    const now = new Date();
-                    const msDate = ms.date ? new Date(ms.date) : null;
-                    const done = ms.status === 'done';
-                    const overdue = !done && msDate && msDate < now;
-                    const isEditing = editingMs === i;
-                    // RAG dots — derive from milestone position and health dims
-                    const techRag = done ? '#34D399' : h.dims.quality >= 70 ? '#34D399' : h.dims.quality >= 50 ? '#FBBF24' : '#F87171';
-                    const execRag = done ? '#34D399' : h.dims.tasks >= 70 ? '#34D399' : h.dims.tasks >= 50 ? '#FBBF24' : '#F87171';
-                    const ttmRag = done ? '#34D399' : h.dims.schedule >= 70 ? '#34D399' : h.dims.schedule >= 50 ? '#FBBF24' : '#F87171';
+    {/* ═══ MILESTONE TIMELINE ═══ */}
+    <Cd delay={0.1} hover={false} className="p-5 md:p-6 mb-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Key Milestones</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">{(p.milestones || []).length} milestones — chronological view</p>
+        </div>
+        <button
+          onClick={() => setDetailTab('milestones')}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer bg-transparent border-none"
+        >
+          View all →
+        </button>
+      </div>
+      <MilestoneTimeline
+        milestones={p.milestones || []}
+        onItemClick={() => setDetailTab('milestones')}
+      />
+    </Cd>
 
-                    return (
-                      <tr key={i} className={`border-b border-border/50 ${overdue ? 'bg-destructive/5' : ''} cursor-pointer hover:bg-muted/50 transition-colors`}
-                        onClick={() => setEditingMs(isEditing ? null : i)}>
-                        <td className={`py-2.5 pr-3 font-semibold ${done ? 'text-muted-foreground' : overdue ? 'text-destructive font-bold' : 'text-foreground'}`}>
-                          {ms.name}
-                        </td>
-                        <td className={`py-2.5 px-2 ${overdue ? 'text-destructive font-bold' : 'text-secondary-foreground'}`}>
-                          {ms.date ? new Date(ms.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
-                        </td>
-                        <td className="py-2.5 px-2 text-secondary-foreground">{ms.owner || p.owner.name.split(' ').pop()}</td>
-                        <td className="py-2.5 px-1 text-center"><span className="inline-block w-3 h-3 rounded-full" style={{ background: techRag }} /></td>
-                        <td className="py-2.5 px-1 text-center"><span className="inline-block w-3 h-3 rounded-full" style={{ background: execRag }} /></td>
-                        <td className="py-2.5 px-1 text-center"><span className="inline-block w-3 h-3 rounded-full" style={{ background: ttmRag }} /></td>
-                        <td className="py-2.5 pl-2 text-muted-foreground">
-                          {ms.keyIssue || (overdue ? `${Math.floor((now.getTime() - msDate!.getTime()) / 86400000)} days overdue` : '')}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+    {/* ═══ TASKS in Overview (with inline comments) ═══ */}
+    <Cd delay={0.15} hover={false} className="p-5 md:p-6 mb-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Tasks</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">{prgTasks.length} tasks for this program</p>
+        </div>
+        <button onClick={() => setShowNewTask(true)}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer">
+          <I name="plus" size={12} color="currentColor" />New Task
+        </button>
+      </div>
 
-              {/* Inline milestone editor */}
-              <AnimatePresence>
-                {editingMs !== null && (p.milestones || [])[editingMs] && (() => {
-                  const ms = p.milestones[editingMs];
+      {/* Create Task Dialog */}
+      <CreateTaskDialog
+        open={showNewTask}
+        onClose={() => setShowNewTask(false)}
+        onSubmit={async (d) => {
+          try {
+            const saved = await apiCreateTask({ title: d.title, programId: p.id, assigneeId: d.assignee, priority: d.priority, status: d.status, dueDate: d.due, description: d.desc });
+            setTasks(prev => [...prev, mapTask(saved)]);
+          } catch (err) {
+            console.error('Failed to create task:', err);
+            alert('Failed to create task. Please try again.');
+          }
+        }}
+        defaultProgramId={p.id}
+        hideProgramField={true}
+        currentUser={ME}
+      />
+
+      {/* Edit Task Dialog */}
+      <CreateTaskDialog
+        open={!!editingTask}
+        onClose={() => setEditingTask(null)}
+        onSubmit={async (d) => {
+          if (!editingTask) return;
+          const assignee = d.assignee === ME.id ? ME : (USERS.find(u2 => u2.id === d.assignee) || ME);
+          setTasks(prev => prev.map(t => t.id === editingTask.id ? { ...t, title: d.title, assignee, priority: d.priority, status: d.status, due: d.due, desc: d.desc } : t));
+          try {
+            await apiUpdateTask(editingTask.id, { title: d.title, assigneeId: d.assignee, priority: d.priority, status: d.status, dueDate: d.due, description: d.desc });
+          } catch (err) {
+            console.error('Failed to update task:', err);
+          }
+        }}
+        initialTask={editingTask}
+        defaultProgramId={p.id}
+        hideProgramField={true}
+        currentUser={ME}
+      />
+
+      <TaskTable
+        tasks={prgTasks}
+        setTasks={setTasks}
+        onEdit={(tk) => setEditingTask(tk)}
+        expandedId={expandedTask}
+        onRowClick={(id) => setExpandedTask(expandedTask === id ? null : id)}
+        renderExpanded={(tk) => (
+          <div className="p-4 md:p-5 space-y-3">
+            <Comments eId={tk.id} com={com} setCom={setCom} rep={rep} setRep={setRep} />
+          </div>
+        )}
+      />
+    </Cd>
+
+    {/* ═══ DOCUMENTS in Overview ═══ */}
+    <DocumentsSection p={p} docs={docs} setDocs={setDocs} ME={ME}/>
+    </>}
+
+    {/* ═══ FULL-WIDTH MILESTONE TABLE — shadcn style ═══ */}
+    {detailTab==="milestones" && <Cd delay={0.05} hover={false} className="p-4 md:p-5 mb-5" id="milestone-table">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-semibold text-foreground">Critical milestones</div>
+        <div className="flex items-center gap-2">
+          {msSnapshot && JSON.stringify(msSnapshot) !== JSON.stringify(p.milestones) && (
+            <button onClick={resetAllMilestones}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium border border-border bg-background hover:bg-muted text-foreground transition-colors cursor-pointer">
+              <I name="x" size={12} color="currentColor" />Reset All
+            </button>
+          )}
+          {isProgramOwner && (
+            <button onClick={() => setInsertAt(Infinity)}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer">
+              <I name="plus" size={12} color="currentColor" />Add milestone
+            </button>
+          )}
+        </div>
+      </div>
+      <HealthLegend milestones={p.milestones || []} />
+
+      {/* Right-click context menu */}
+      {ctxMenu && (() => {
+        const idx = ctxMenu.idx;
+        const ms = (p.milestones || [])[idx];
+        if (!ms) return null;
+        const done = ms.status === 'done';
+        const menuItem = "w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2";
+        return (
+          <div ref={ctxMenuRef} className="fixed w-48 bg-popover border border-border rounded-md shadow-md z-[100] py-1"
+            style={{ top: ctxMenu.y, left: ctxMenu.x, background: 'var(--popover, var(--card))' }}>
+            <button onClick={() => { startEditing(idx); setCtxMenu(null); }} className={menuItem}>
+              <I name="edit" size={14} color="var(--muted-foreground)" /> Edit
+            </button>
+            <button onClick={() => {
+              const newStatus = done ? 'pending' : 'done';
+              savePrg(pr => ({ ...pr, milestones: (pr.milestones || []).map((m, j) => j === idx ? { ...m, status: newStatus } : m), lastUpdate: new Date().toISOString() }));
+              setCtxMenu(null);
+            }} className={menuItem}>
+              <I name="check" size={14} color="var(--muted-foreground)" /> {done ? 'Mark Pending' : 'Mark Done'}
+            </button>
+            {msSnapshot && msSnapshot[idx] && JSON.stringify(msSnapshot[idx]) !== JSON.stringify(ms) && (
+              <button onClick={() => { resetMilestone(idx); setCtxMenu(null); }} className={menuItem}>
+                <I name="x" size={14} color="var(--muted-foreground)" /> Reset to Original
+              </button>
+            )}
+            {isProgramOwner && <>
+              <button onClick={() => { setInsertAt(idx); setCtxMenu(null); }} className={menuItem}>
+                <I name="plus" size={14} color="var(--muted-foreground)" /> Insert Below
+              </button>
+              <div className="h-px bg-border my-1" />
+              <button onClick={() => {
+                savePrg(pr => ({ ...pr, milestones: (pr.milestones || []).filter((_, j) => j !== idx), lastUpdate: new Date().toISOString() }));
+                setCtxMenu(null); setMsEditing(null);
+              }} className={`${menuItem} hover:!bg-red-50 dark:hover:!bg-red-950/30`} style={{ color: '#dc2626' }}>
+                <I name="trash" size={14} color="#dc2626" /> Delete
+              </button>
+            </>}
+          </div>
+        );
+      })()}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/30 border-b border-border">
+            <tr>
+              <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Milestone</th>
+              <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground w-24">Category</th>
+              <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground w-28">Date</th>
+              <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground w-28">Owner</th>
+              <th className="text-center px-4 py-3 text-sm font-medium text-muted-foreground w-16" title="Health score (0-100)">Score</th>
+              <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Key Issue</th>
+              <th className="w-14 px-4 py-3 text-right text-sm font-medium text-muted-foreground">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(p.milestones || []).length === 0 ? (
+              <tr><td colSpan={7} className="text-center py-10 text-sm text-muted-foreground">No milestones</td></tr>
+            ) : (p.milestones || []).map((ms, i) => {
+              const now = new Date();
+              const msDate = ms.date ? new Date(ms.date) : null;
+              const done = ms.status === 'done';
+              const overdue = !done && msDate && msDate < now;
+              const meLastName = ME.name.split(' ').pop()?.toLowerCase() || '';
+              const meFirstName = ME.name.split(' ')[0]?.toLowerCase() || '';
+              const msOwnerLower = (ms.owner || '').toLowerCase();
+              const isMsOwner = ms.owner && (msOwnerLower === meLastName || msOwnerLower === meFirstName || msOwnerLower === ME.name.toLowerCase() || msOwnerLower === ME.av.toLowerCase());
+              const canEdit = isProgramOwner || !!isMsOwner;
+              const isEditing = msEditing === i;
+              const scoreC = done ? '#34D399' : milestoneColor(ms.score);
+              const cellInp = "w-full px-2 py-1.5 rounded-md text-sm bg-background border border-border text-foreground outline-none focus:border-primary";
+              const patch = (field: string, value: any) => savePrg(pr => ({ ...pr, milestones: (pr.milestones || []).map((m, j) => j === i ? { ...m, [field]: value } : m), lastUpdate: new Date().toISOString() }));
+              const isMenuOpen = msMenuOpen === i;
+
+              return (<React.Fragment key={i}>
+                <tr className={`border-b border-border last:border-b-0 hover:bg-muted/30 transition-colors ${overdue ? 'bg-destructive/5' : ''}`}
+                  onContextMenu={e => { if (canEdit) { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, idx: i }); setMsMenuOpen(null); } }}>
+                  {/* Milestone name */}
+                  <td className="px-4 py-3">
+                    {isEditing ? (
+                      <input defaultValue={ms.name} onBlur={e => { if (e.target.value.trim()) patch('name', e.target.value.trim()); }}
+                        className={`${cellInp} font-medium`} autoFocus />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        {done && <I name="check" size={14} color="#34D399" />}
+                        <span className={`text-sm font-medium ${done ? 'text-muted-foreground' : overdue ? 'text-destructive' : 'text-foreground'}`}>{ms.name}</span>
+                      </div>
+                    )}
+                  </td>
+                  {/* Category */}
+                  <td className="px-4 py-3">
+                    {isEditing ? (
+                      <select value={ms.category || 'product'} onChange={e => patch('category', e.target.value)} className={cellInp}>
+                        <option value="product">Product</option>
+                        <option value="execution">Execution</option>
+                        <option value="ttm">TTM</option>
+                      </select>
+                    ) : (
+                      <CategoryBadge category={ms.category} />
+                    )}
+                  </td>
+                  {/* Date */}
+                  <td className="px-4 py-3">
+                    {isEditing ? (
+                      <input type="date" defaultValue={ms.date} onBlur={e => patch('date', e.target.value)} className={cellInp} />
+                    ) : (
+                      <span className={`text-sm ${overdue ? 'text-destructive font-medium' : 'text-muted-foreground'}`}>
+                        {ms.date ? new Date(ms.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
+                      </span>
+                    )}
+                  </td>
+                  {/* Owner */}
+                  <td className="px-4 py-3">
+                    {isEditing && isProgramOwner ? (
+                      <select value={ms.owner || ''} onChange={e => patch('owner', e.target.value)} className={cellInp}>
+                        <option value="">—</option>
+                        {USERS.map(u2 => <option key={u2.id} value={u2.name.split(' ').pop() || u2.name}>{u2.name}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-sm text-foreground">{ms.owner || '—'}</span>
+                    )}
+                  </td>
+                  {/* Score */}
+                  <td className="px-4 py-3 text-center">
+                    {isEditing && !done ? (() => {
+                      const prevScore = msSnapshot?.[i]?.score;
+                      const changed = prevScore != null && ms.score !== prevScore;
+                      return (
+                        <div className="flex flex-col items-center gap-0.5">
+                          <MilestoneScoreInput
+                            key={`score-${i}-${msEditing}`}
+                            initial={ms.score}
+                            onCommit={(n) => patch('score', n)}
+                          />
+                          {prevScore != null && (
+                            <span className={`text-xs ${changed ? 'text-muted-foreground' : 'text-muted-foreground/50'}`}
+                              title="Previous value">
+                              was {prevScore}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })() : (
+                      <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: scoreC }} />
+                        {ms.score != null && <span className="text-sm font-semibold" style={{ color: scoreC }}>{ms.score}</span>}
+                      </span>
+                    )}
+                  </td>
+                  {/* Key issue */}
+                  <td className="px-4 py-3">
+                    {isEditing ? (
+                      <input defaultValue={ms.keyIssue || ''} placeholder="Key issue…" onBlur={e => patch('keyIssue', e.target.value)} className={`${cellInp}`} />
+                    ) : (
+                      <span className="text-sm text-muted-foreground">{ms.keyIssue || (overdue ? `${Math.floor((now.getTime() - msDate!.getTime()) / 86400000)}d overdue` : '')}</span>
+                    )}
+                  </td>
+                  {/* Actions — 3-dot menu */}
+                  <td className="px-4 py-3 text-right relative">
+                    {canEdit && (
+                      <>
+                        <button onClick={() => { setMsMenuOpen(isMenuOpen ? null : i); setCtxMenu(null); }}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded hover:bg-muted transition-colors cursor-pointer bg-transparent border-none"
+                          aria-label="Milestone actions">
+                          <I name="more" size={16} color="var(--muted-foreground)" />
+                        </button>
+                        {isMenuOpen && (
+                          <div ref={msMenuRef}
+                            className="absolute right-2 top-full mt-1 w-48 bg-popover border border-border rounded-md shadow-md z-50 py-1"
+                            style={{ background: 'var(--popover, var(--card))' }}>
+                            <button onClick={() => { if (isEditing) setMsEditing(null); else startEditing(i); setMsMenuOpen(null); }}
+                              className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2">
+                              <I name="edit" size={14} color="var(--muted-foreground)" /> {isEditing ? 'Stop Editing' : 'Edit'}
+                            </button>
+                            <button onClick={() => { patch('status', done ? 'pending' : 'done'); setMsMenuOpen(null); }}
+                              className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2">
+                              <I name="check" size={14} color="var(--muted-foreground)" /> {done ? 'Mark Pending' : 'Mark Done'}
+                            </button>
+                            {msSnapshot && msSnapshot[i] && JSON.stringify(msSnapshot[i]) !== JSON.stringify(ms) && (
+                              <button onClick={() => { resetMilestone(i); setMsMenuOpen(null); }}
+                                className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2">
+                                <I name="x" size={14} color="var(--muted-foreground)" /> Reset to Original
+                              </button>
+                            )}
+                            {isProgramOwner && <>
+                              <button onClick={() => { setInsertAt(i); setMsMenuOpen(null); }}
+                                className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-muted rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2">
+                                <I name="plus" size={14} color="var(--muted-foreground)" /> Insert Below
+                              </button>
+                              <div className="h-px bg-border my-1" />
+                              <button onClick={() => {
+                                savePrg(pr => ({ ...pr, milestones: (pr.milestones || []).filter((_, j) => j !== i), lastUpdate: new Date().toISOString() }));
+                                setMsMenuOpen(null); setMsEditing(null);
+                              }} className="w-full text-left px-3 py-1.5 text-sm hover:bg-red-50 dark:hover:bg-red-950/30 rounded-sm cursor-pointer bg-transparent border-none flex items-center gap-2"
+                                style={{ color: '#dc2626' }}>
+                                <I name="trash" size={14} color="#dc2626" /> Delete
+                              </button>
+                            </>}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </td>
+                </tr>
+                {/* Inline insert row */}
+                {insertAt === i && (() => {
+                  const inp = "w-full px-3 py-2 rounded-md text-sm bg-background border border-border text-foreground outline-none";
+                  const saveMs = () => {
+                    if (!newMsForm.name) return;
+                    const newMs = { name: newMsForm.name, date: newMsForm.date, status: 'pending' as const, owner: newMsForm.owner, keyIssue: newMsForm.keyIssue, category: newMsForm.category as any, score: newMsForm.tech ? parseInt(String(newMsForm.tech)) || undefined : undefined };
+                    savePrg(pr => { const ms = [...(pr.milestones || [])]; ms.splice(i + 1, 0, newMs); return { ...pr, milestones: ms, lastUpdate: new Date().toISOString() }; });
+                    resetAddForm();
+                  };
                   return (
-                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
-                      className="mt-3 p-4 rounded-xl bg-card border border-border">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="text-xs font-bold text-foreground">Edit milestone: {ms.name}</div>
-                        <motion.button whileTap={{ scale: .95 }} onClick={(e) => { e.stopPropagation(); setEditingMs(null); }}
-                          className="p-1 rounded bg-border/50 cursor-pointer"><I name="x" size={12} color="var(--muted-foreground)" /></motion.button>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
-                        <div>
-                          <label className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold block mb-1">Owner</label>
-                          <input defaultValue={ms.owner || p.owner.name.split(' ').pop() || ''}
-                            onBlur={(e) => updateMilestone(editingMs, { owner: e.target.value })}
-                            className="w-full px-3 py-2 rounded-lg text-xs bg-background border border-border text-foreground outline-none" style={{ fontFamily: 'inherit' }} />
-                        </div>
-                        <div>
-                          <label className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold block mb-1">Status</label>
-                          <select defaultValue={ms.status}
-                            onChange={(e) => updateMilestone(editingMs, { status: e.target.value as 'pending' | 'done' })}
-                            className="w-full px-3 py-2 rounded-lg text-xs bg-background border border-border text-foreground outline-none">
-                            <option value="pending">Pending</option>
-                            <option value="done">Done</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold block mb-1">Date</label>
-                          <input type="date" defaultValue={ms.date}
-                            onBlur={(e) => updateMilestone(editingMs, { date: e.target.value })}
-                            className="w-full px-3 py-2 rounded-lg text-xs bg-background border border-border text-foreground outline-none" />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold block mb-1">Key issue / notes</label>
-                        <input defaultValue={ms.keyIssue || ''}
-                          placeholder="Describe the key issue, blocker, or status note…"
-                          onBlur={(e) => updateMilestone(editingMs, { keyIssue: e.target.value })}
-                          onKeyDown={(e) => { if (e.key === 'Enter') { updateMilestone(editingMs, { keyIssue: (e.target as HTMLInputElement).value }); } }}
-                          className="w-full px-3 py-2 rounded-lg text-xs bg-background border border-border text-foreground outline-none" style={{ fontFamily: 'inherit' }}
-                          autoFocus />
-                      </div>
-                    </motion.div>
+                    <tr key={`insert-${i}`} className="border-b border-border bg-blue-50/30 dark:bg-blue-950/10">
+                      <td className="px-4 py-2"><input value={newMsForm.name} onChange={e => setNewMsForm(f => ({ ...f, name: e.target.value }))} placeholder="Milestone name…" className={inp} autoFocus /></td>
+                      <td className="px-4 py-2"><select value={newMsForm.category} onChange={e => setNewMsForm(f => ({ ...f, category: e.target.value as any }))} className={inp}><option value="product">Product</option><option value="execution">Execution</option><option value="ttm">TTM</option></select></td>
+                      <td className="px-4 py-2"><input type="date" value={newMsForm.date} onChange={e => setNewMsForm(f => ({ ...f, date: e.target.value }))} className={inp} /></td>
+                      <td className="px-4 py-2"><select value={newMsForm.owner} onChange={e => setNewMsForm(f => ({ ...f, owner: e.target.value }))} className={inp}><option value="">Owner…</option>{USERS.map(u2 => <option key={u2.id} value={u2.name.split(' ').pop() || u2.name}>{u2.name}</option>)}</select></td>
+                      <td className="px-4 py-2 text-center"><input type="number" min={0} max={100} value={newMsForm.tech || ''} placeholder="—" onChange={e => setNewMsForm(f => ({ ...f, tech: e.target.value as any }))} className="w-14 px-1 py-1.5 rounded text-sm text-center font-bold outline-none border border-border bg-background text-foreground" /></td>
+                      <td className="px-4 py-2" colSpan={2}><div className="flex items-center gap-2">
+                        <input value={newMsForm.keyIssue} onChange={e => setNewMsForm(f => ({ ...f, keyIssue: e.target.value }))} placeholder="Key issue…" className={`${inp} flex-1`} onKeyDown={e => { if (e.key === 'Enter') saveMs(); }} />
+                        <button onClick={saveMs} disabled={!newMsForm.name} className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"><I name="check" size={12} color="currentColor" />Save</button>
+                        <button onClick={resetAddForm} className="inline-flex items-center h-8 px-3 rounded-md text-sm font-medium border border-border bg-background hover:bg-muted text-foreground cursor-pointer">Cancel</button>
+                      </div></td>
+                    </tr>
                   );
                 })()}
-              </AnimatePresence>
-            </div>
-          </div>
-        </div>
-
-        {/* RIGHT: Program status & weighted risk roll-up */}
-        <div className={mob ? 'w-full' : 'w-72 flex-shrink-0'}>
-          <div className="p-4 rounded-xl bg-card border border-border">
-            <div className="text-xs font-bold text-foreground mb-3">Program status &amp; weighted risk roll-up</div>
-
-            {/* Overall status badge */}
-            <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-muted-foreground">Overall status</span>
-              <span className="px-3 py-1 rounded-full text-xs font-bold" style={{ background: healthBg(h.composite), color: h.color, border: `1px solid ${h.color}33` }}>
-                {h.label}
-              </span>
-            </div>
-
-            {/* Donut chart */}
-            <div className="flex justify-center mb-4">
-              <svg width="140" height="140" viewBox="0 0 140 140">
-                {(() => {
-                  const dims = [
-                    { key: 'schedule', label: 'Schedule', pct: w.schedule },
-                    { key: 'milestones', label: 'Milestones', pct: w.milestones },
-                    { key: 'tasks', label: 'Tasks', pct: w.tasks },
-                    { key: 'budget', label: 'Budget', pct: w.budget },
-                    { key: 'quality', label: 'Quality', pct: w.quality },
-                  ];
-                  const r = 50, cx = 70, cy = 70, gap = 0.02;
-                  let accum = 0;
-                  return dims.map(d => {
-                    const startAngle = accum * 2 * Math.PI - Math.PI / 2 + gap;
-                    accum += d.pct;
-                    const endAngle = accum * 2 * Math.PI - Math.PI / 2 - gap;
-                    const x1 = cx + r * Math.cos(startAngle);
-                    const y1 = cy + r * Math.sin(startAngle);
-                    const x2 = cx + r * Math.cos(endAngle);
-                    const y2 = cy + r * Math.sin(endAngle);
-                    const large = d.pct > 0.5 ? 1 : 0;
-                    const color = healthColor(h.dims[d.key]);
-                    // Label position
-                    const midAngle = (startAngle + endAngle) / 2;
-                    const lx = cx + (r - 14) * Math.cos(midAngle);
-                    const ly = cy + (r - 14) * Math.sin(midAngle);
-                    return (
-                      <g key={d.key}>
-                        <path d={`M${x1} ${y1} A${r} ${r} 0 ${large} 1 ${x2} ${y2} L${cx} ${cy} Z`}
-                          fill={color} opacity={0.85} stroke="var(--background)" strokeWidth="2" />
-                        <text x={lx} y={ly} textAnchor="middle" dominantBaseline="central" fill="var(--background)" fontSize="10" fontWeight="700">
-                          {Math.round(d.pct * 100)}
-                        </text>
-                      </g>
-                    );
-                  });
-                })()}
-                {/* Center hole */}
-                <circle cx="70" cy="70" r="28" fill="var(--card)" />
-                <text x="70" y="67" textAnchor="middle" dominantBaseline="central" fill="var(--foreground)" fontSize="18" fontWeight="800">{h.composite}</text>
-                <text x="70" y="82" textAnchor="middle" dominantBaseline="central" fill="var(--muted-foreground)" fontSize="8">/100</text>
-              </svg>
-            </div>
-
-            {/* Dimension breakdown */}
-            <div className="space-y-2">
-              {Object.entries(h.dims).map(([key, val]) => {
-                const meta = DIM_META[key];
-                const c = healthColor(val);
-                const ragLabel = val >= 75 ? 'GREEN' : val >= 50 ? 'AMBER' : 'RED';
-                const weight = Math.round((w[key] || 0) * 100);
-                return (
-                  <div key={key} className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: c }} />
-                    <span className="text-xs text-foreground font-medium flex-1">{meta.label}</span>
-                    <span className="text-[10px] text-muted-foreground">{weight}%</span>
-                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full" style={{ background: `${c}18`, color: c, minWidth: 48, textAlign: 'center' }}>{ragLabel}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Immediate actions */}
-          {h.alerts.length > 0 && (
-            <div className="mt-3 p-4 rounded-xl" style={{ background: h.composite < 50 ? u.errD : u.wD, border: `1px solid ${h.composite < 50 ? u.err : u.w}22` }}>
-              <div className="text-xs font-bold mb-2" style={{ color: h.composite < 50 ? u.err : '#92400E' }}>Immediate actions</div>
-              <ul className="space-y-1.5">
-                {h.alerts.map((a, i) => (
-                  <li key={i} className="text-xs text-secondary-foreground flex items-start gap-1.5">
-                    <span className="mt-1 w-1 h-1 rounded-full flex-shrink-0" style={{ background: h.composite < 50 ? u.err : '#92400E' }} />
-                    {a}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-        </div>
+              </React.Fragment>);
+            })}
+            {/* Add row at end */}
+            {insertAt >= 0 && insertAt === Infinity && (() => {
+              const inp = "w-full px-3 py-2 rounded-md text-sm bg-background border border-border text-foreground outline-none";
+              const saveMs = () => {
+                if (!newMsForm.name) return;
+                const newMs = { name: newMsForm.name, date: newMsForm.date, status: 'pending' as const, owner: newMsForm.owner, keyIssue: newMsForm.keyIssue, category: newMsForm.category as any, score: newMsForm.tech ? parseInt(String(newMsForm.tech)) || undefined : undefined };
+                savePrg(pr => ({ ...pr, milestones: [...(pr.milestones || []), newMs], lastUpdate: new Date().toISOString() }));
+                resetAddForm();
+              };
+              return (
+                <tr className="border-b border-border bg-blue-50/30 dark:bg-blue-950/10">
+                  <td className="px-4 py-2"><input value={newMsForm.name} onChange={e => setNewMsForm(f => ({ ...f, name: e.target.value }))} placeholder="Milestone name…" className={inp} autoFocus /></td>
+                  <td className="px-4 py-2"><select value={newMsForm.category} onChange={e => setNewMsForm(f => ({ ...f, category: e.target.value as any }))} className={inp}><option value="product">Product</option><option value="execution">Execution</option><option value="ttm">TTM</option></select></td>
+                  <td className="px-4 py-2"><input type="date" value={newMsForm.date} onChange={e => setNewMsForm(f => ({ ...f, date: e.target.value }))} className={inp} /></td>
+                  <td className="px-4 py-2"><select value={newMsForm.owner} onChange={e => setNewMsForm(f => ({ ...f, owner: e.target.value }))} className={inp}><option value="">Owner…</option>{USERS.map(u2 => <option key={u2.id} value={u2.name.split(' ').pop() || u2.name}>{u2.name}</option>)}</select></td>
+                  <td className="px-4 py-2 text-center"><input type="number" min={0} max={100} value={newMsForm.tech || ''} placeholder="—" onChange={e => setNewMsForm(f => ({ ...f, tech: e.target.value as any }))} className="w-14 px-1 py-1.5 rounded text-sm text-center font-bold outline-none border border-border bg-background text-foreground" /></td>
+                  <td className="px-4 py-2" colSpan={2}><div className="flex items-center gap-2">
+                    <input value={newMsForm.keyIssue} onChange={e => setNewMsForm(f => ({ ...f, keyIssue: e.target.value }))} placeholder="Key issue…" className={`${inp} flex-1`} onKeyDown={e => { if (e.key === 'Enter') saveMs(); }} />
+                    <button onClick={saveMs} disabled={!newMsForm.name} className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"><I name="check" size={12} color="currentColor" />Save</button>
+                    <button onClick={resetAddForm} className="inline-flex items-center h-8 px-3 rounded-md text-sm font-medium border border-border bg-background hover:bg-muted text-foreground cursor-pointer">Cancel</button>
+                  </div></td>
+                </tr>
+              );
+            })()}
+          </tbody>
+        </table>
       </div>
-
-      {/* ═══ INFO GRID (below the two-column layout) ═══ */}
-      <div className="mt-5 pt-4 border-t border-border">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-2">
-          {[
-            { l: "Owner", v: p.owner.name },
-            { l: "Assigned By", v: p.assignedBy?.name || "—" },
-            { l: "Assigned Date", v: p.assignedDate || "—" },
-            { l: "Delivery ASK", v: p.deliveryAsk || "—" },
-            { l: "Delivery Commit", v: p.deliveryCommit || "—" },
-          ].map((d, i) => <div key={i}><div className="text-[8px] uppercase tracking-wider mb-0.5 text-muted-foreground">{d.l}</div><div className="text-sm font-bold text-foreground">{d.v}</div></div>)}
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[
-            { l: "Team", v: p.team },
-            { l: "Budget", v: p.budget },
-            { l: "Used", v: `${p.budgetUsed}%` },
-            { l: "Last Update", v: p.lastUpdate ? new Date(p.lastUpdate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : "—" },
-          ].map((d, i) => <div key={i}><div className="text-[8px] uppercase tracking-wider mb-0.5 text-muted-foreground">{d.l}</div><div className="text-sm font-bold text-foreground">{d.v}</div></div>)}
-        </div>
-      </div>
-
-      {/* Progress bar */}
-      <div className="mt-4">
-        <div className="flex justify-between text-xs mb-2 text-muted-foreground"><span>Progress</span><span className="font-bold text-foreground">{p.progress}%</span></div>
-        <GB pct={p.progress} h={mob ? 8 : 10} color={progressColor} />
-      </div>
-    </Cd>
-
-    {/* ═══ TRAFFIC SIGNAL HEALTH (unified view + editor) ═══ */}
-    <HealthCard
-      health={p.health || emptyHealth()}
-      issues={p.issues || []}
-      isEditor={pRole.isEditor}
-      onHealthChange={(h) => setPrg(prev => prev.map(pr => pr.id === p.id ? { ...pr, health: h } : pr))}
-      onIssuesChange={(iss) => setPrg(prev => prev.map(pr => pr.id === p.id ? { ...pr, issues: iss } : pr))}
-      currentUser={ME.av}
-    />
-
-    {/* ═══ HEALTH METRICS + KEY ISSUES (API-backed) ═══ */}
-    <ProgramMetrics programId={p.id} isEditor={pRole.isEditor} />
-    <ProgramIssues programId={p.id} isEditor={pRole.isEditor} />
+    </Cd>}
 
     {/* ═══ TASKS ═══ */}
-    <Cd delay={.08} hover={false} className="p-4 md:p-5 mb-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2"><I name="clipboard" size={16} color="var(--foreground)"/><span className="text-sm font-bold text-foreground">Tasks</span><span className="text-xs text-muted-foreground">({prgTasks.length})</span></div>
-        <motion.button whileTap={{scale:.95}} onClick={()=>setShowNewTask(!showNewTask)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold" style={{background:showNewTask?'var(--border)':accent,color:showNewTask?'var(--muted-foreground)':accentText}}>
-          <I name={showNewTask?"x":"plus"} size={12} color={showNewTask?'var(--muted-foreground)':accentText}/>{showNewTask?"Cancel":"New Task"}
-        </motion.button>
-      </div>
-
-      {/* New task form */}
-      <AnimatePresence>{showNewTask&&(
-        <motion.div initial={{height:0,opacity:0}} animate={{height:"auto",opacity:1}} exit={{height:0,opacity:0}} className="mb-5 p-4 md:p-5 rounded-xl bg-muted border border-border">
-          <div className="space-y-3">
-            <input value={newTask.title} onChange={e=>setNewTask({...newTask,title:e.target.value})} placeholder="Task title…" className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground focus:border-primary"/>
-            <textarea value={newTask.desc} onChange={e=>setNewTask({...newTask,desc:e.target.value})} placeholder="Description…" rows={2} className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none bg-card border border-border text-foreground focus:border-primary"/>
-            <div className="flex flex-col md:flex-row gap-3">
-              <div className="flex-1"><label className="text-xs mb-1 block text-muted-foreground">Assignee</label>
-                <select value={newTask.assignee} onChange={e=>setNewTask({...newTask,assignee:e.target.value})} className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground">
-                  {USERS.map(u2=><option key={u2.id} value={u2.id}>{u2.name} ({u2.role})</option>)}
-                </select>
-              </div>
-              <div className="flex gap-3">
-              <div className="flex-1"><label className="text-xs mb-1 block text-muted-foreground">Priority</label>
-                <select value={newTask.priority} onChange={e=>setNewTask({...newTask,priority:e.target.value})} className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground">
-                  {["P0","P1","P2","P3"].map(p2=><option key={p2} value={p2}>{p2}</option>)}
-                </select>
-              </div>
-              <div className="flex-1"><label className="text-xs mb-1 block text-muted-foreground">Due Date</label>
-                <input type="date" value={newTask.due} onChange={e=>setNewTask({...newTask,due:e.target.value})} className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground"/>
-              </div>
-              </div>
-            </div>
-            <motion.button whileTap={{scale:.95}} disabled={!newTask.title.trim()} onClick={()=>{
-              if(!newTask.title.trim())return;
-              setTasks(prev=>[...prev,{id:`TK-${String(prev.length+1).padStart(3,"0")}`,title:newTask.title,prgId:p.id,assignee:USERS.find(u2=>u2.id===newTask.assignee)||USERS[0],reporter:ME,priority:newTask.priority,status:"Todo",due:newTask.due,desc:newTask.desc}]);
-              apiCreateTask({ title: newTask.title, prgId: p.id, assignee: newTask.assignee, priority: newTask.priority, due: newTask.due, desc: newTask.desc }).catch(() => {});
-              setNewTask({title:"",assignee:USERS[0].id,priority:"P1",due:"",desc:""});setShowNewTask(false);
-            }} className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold" style={{background:newTask.title.trim()?accent:'var(--border)',color:newTask.title.trim()?accentText:'var(--muted-foreground)',opacity:newTask.title.trim()?1:.5}}>
-              <I name="plus" size={12} color={newTask.title.trim()?accentText:'var(--muted-foreground)'}/>Create Task
-            </motion.button>
-          </div>
-        </motion.div>
-      )}</AnimatePresence>
-
-      {/* Task list */}
-      {prgTasks.length===0?<div className="text-center py-6 text-xs text-muted-foreground">No tasks yet — create one above</div>:
-      <div className="space-y-3">{prgTasks.map((tk,i)=>{
-        const priC={"P0":{c:u.err,bg:u.errD},"P1":{c:u.w,bg:u.wD},"P2":{c:u.inf,bg:u.infD},"P3":{c:'#2563EB',bg:"rgba(147,197,253,.1)"}}[tk.priority]||{c:'#2563EB',bg:"rgba(147,197,253,.1)"};
-        const stC={"Todo":{c:"var(--muted-foreground)",bg:"var(--muted)"},"In Progress":{c:u.inf,bg:u.infD},"In Review":{c:u.pur,bg:u.purD},"Done":{c:u.ok,bg:u.okD}}[tk.status]||{c:"var(--muted-foreground)",bg:"var(--muted)"};
-        return(
-          <motion.div key={tk.id} initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} transition={{delay:i*.03}} className="p-3 rounded-xl bg-muted border border-border" style={{opacity:tk.status==="Done"?.5:1}}>
-            <div className="flex items-start gap-3">
-              <motion.button whileTap={{scale:.8}} onClick={()=>{setTasks(prev=>prev.map(t=>t.id===tk.id?{...t,status:t.status==="Done"?"Todo":"Done"}:t));apiUpdateTask(tk.id, { status: tk.status === "Done" ? "Todo" : "Done" }).catch(() => {});}}
-                className="w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 cursor-pointer mt-0.5" style={{border:`1.5px solid ${tk.status==="Done"?u.ok:'var(--muted-foreground)'}`,background:tk.status==="Done"?u.okD:"transparent"}}>
-                {tk.status==="Done"&&<I name="check" size={12} color={u.ok}/>}
-              </motion.button>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                  <span className="text-xs font-mono text-muted-foreground">{tk.id}</span>
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{color:priC.c,background:priC.bg}}>{tk.priority}</span>
-                </div>
-                <div className="text-xs font-medium" style={{color:tk.status==="Done"?'var(--muted-foreground)':'var(--foreground)',textDecoration:tk.status==="Done"?"line-through":"none"}}>{tk.title}</div>
-                {tk.desc&&<div className="text-xs truncate mt-0.5 text-muted-foreground">{mob?tk.desc.slice(0,50):tk.desc.slice(0,80)}…</div>}
-                <div className="flex items-center gap-2 mt-2">
-                  <Av user={tk.assignee} size={18}/>
-                  <span className="text-xs text-secondary-foreground">{tk.assignee.name}</span>
-                  {tk.due&&<span className="text-xs flex items-center gap-1 ml-auto text-muted-foreground"><I name="calendar" size={9} color="var(--muted-foreground)"/>{tk.due}</span>}
-                </div>
-              </div>
-            </div>
-            <div className="flex gap-1 flex-wrap mt-3 ml-8">{["Todo","In Progress","In Review","Done"].map(s=>(
-              <motion.button key={s} whileTap={{scale:.88}} onClick={()=>{setTasks(prev=>prev.map(t=>t.id===tk.id?{...t,status:s}:t));apiUpdateTask(tk.id, { status: s }).catch(() => {});}}
-                className="px-2 py-0.5 rounded-md cursor-pointer text-[8px]" style={{border:`1px solid ${tk.status===s?stC.c:'var(--border)'}`,background:tk.status===s?stC.bg:"transparent",color:tk.status===s?stC.c:'var(--muted-foreground)',fontWeight:tk.status===s?700:400}}>{s}</motion.button>
-            ))}</div>
-          </motion.div>
-        );
-      })}</div>}
-    </Cd>
-
     {/* ═══ DOCUMENTS ═══ */}
-    <DocumentsSection p={p} docs={docs} setDocs={setDocs} ME={ME}/>
 
-    <Comments eId={p.id} com={com} setCom={setCom} rep={rep} setRep={setRep}/>
+    {/* ═══ COMMENTS ═══ */}
+
   </motion.div>);
 }
 
@@ -503,12 +820,11 @@ function DocumentsSection({ p, docs, setDocs, ME }: { p: Program; docs: Doc[]; s
           <span className="text-sm font-bold text-foreground">Documents</span>
           <span className="text-xs text-muted-foreground">({prgDocs.length})</span>
         </div>
-        <motion.button whileTap={{ scale: 0.95 }} onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold"
-          style={{ background: showForm ? 'var(--border)' : accent, color: showForm ? 'var(--muted-foreground)' : accentText }}>
-          <I name={showForm ? "x" : "plus"} size={12} color={showForm ? 'var(--muted-foreground)' : accentText} />
+        <button onClick={() => setShowForm(!showForm)}
+          className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium transition-colors cursor-pointer ${showForm ? 'border border-border bg-background text-foreground hover:bg-muted' : 'bg-primary text-primary-foreground hover:bg-primary/90'}`}>
+          <I name={showForm ? "x" : "plus"} size={12} color="currentColor" />
           {showForm ? "Cancel" : "Link Document"}
-        </motion.button>
+        </button>
       </div>
 
       {/* Add document form */}
@@ -533,11 +849,10 @@ function DocumentsSection({ p, docs, setDocs, ME }: { p: Program; docs: Doc[]; s
               </div>
             </div>
             <input value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} placeholder="URL…" className="w-full px-3 py-2 rounded-lg text-xs outline-none bg-card border border-border text-foreground focus:border-primary" />
-            <motion.button whileTap={{ scale: 0.95 }} disabled={!form.name.trim() || !form.url.trim()} onClick={addDoc}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold"
-              style={{ background: form.name.trim() && form.url.trim() ? accent : 'var(--border)', color: form.name.trim() && form.url.trim() ? accentText : 'var(--muted-foreground)', opacity: form.name.trim() && form.url.trim() ? 1 : 0.5 }}>
-              <I name="plus" size={12} color={form.name.trim() && form.url.trim() ? accentText : 'var(--muted-foreground)'} />Link Document
-            </motion.button>
+            <button disabled={!form.name.trim() || !form.url.trim()} onClick={addDoc}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer disabled:opacity-50 disabled:pointer-events-none">
+              <I name="plus" size={12} color="currentColor" />Link Document
+            </button>
           </div>
         </motion.div>
       )}</AnimatePresence>
@@ -557,13 +872,13 @@ function DocumentsSection({ p, docs, setDocs, ME }: { p: Program; docs: Doc[]; s
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs font-bold text-foreground truncate">{d.name}</span>
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{ color: meta.color, background: `${meta.color}18` }}>{meta.label}</span>
-                  {d.category && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-accent text-primary">{d.category}</span>}
+                  <span className="px-1.5 py-0.5 rounded text-xs font-bold" style={{ color: meta.color, background: `${meta.color}18` }}>{meta.label}</span>
+                  {d.category && <span className="px-1.5 py-0.5 rounded text-xs font-bold bg-accent text-primary">{d.category}</span>}
                 </div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">Added by {d.addedBy.name}</div>
+                <div className="text-xs text-muted-foreground mt-0.5">Added by {d.addedBy.name}</div>
               </div>
               <a href={d.url} target="_blank" rel="noopener noreferrer"
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-accent text-primary hover:opacity-80 transition-opacity flex-shrink-0">
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-accent text-primary hover:opacity-80 transition-opacity flex-shrink-0">
                 <I name="external" size={10} color="var(--primary)" />Open
               </a>
               <motion.button whileTap={{ scale: 0.8 }} onClick={() => removeDoc(d.id)}
@@ -575,5 +890,212 @@ function DocumentsSection({ p, docs, setDocs, ME }: { p: Program; docs: Doc[]; s
         })}</div>
       )}
     </Cd>
+  );
+}
+
+/* ═══ PROGRAM NPI TIMELINE TAB ═══ */
+function ProgramTimeline({ p }: { p: Program }) {
+  const mob = useIsMobile();
+  const milestones = p.milestones || [];
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStart = useRef({ x: 0, scrollLeft: 0 });
+  const [hoveredMs, setHoveredMs] = useState<typeof milestones[0] | null>(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+
+  /* Drag handlers */
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!containerRef.current) return;
+    setIsDragging(true);
+    dragStart.current = { x: e.clientX, scrollLeft: containerRef.current.scrollLeft };
+    containerRef.current.style.cursor = "grabbing";
+    containerRef.current.style.userSelect = "none";
+  }, []);
+  const onMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isDragging || !containerRef.current) return;
+    containerRef.current.scrollLeft = dragStart.current.scrollLeft - (e.clientX - dragStart.current.x);
+  }, [isDragging]);
+  const onMouseUp = useCallback(() => {
+    setIsDragging(false);
+    if (containerRef.current) { containerRef.current.style.cursor = "grab"; containerRef.current.style.removeProperty("user-select"); }
+  }, []);
+  useEffect(() => { const h = () => setIsDragging(false); window.addEventListener("mouseup", h); return () => window.removeEventListener("mouseup", h); }, []);
+  const onTouchStart = useCallback((e: React.TouchEvent) => { if (!containerRef.current) return; dragStart.current = { x: e.touches[0].clientX, scrollLeft: containerRef.current.scrollLeft }; }, []);
+  const onTouchMove = useCallback((e: React.TouchEvent) => { if (!containerRef.current) return; containerRef.current.scrollLeft = dragStart.current.scrollLeft - (e.touches[0].clientX - dragStart.current.x); }, []);
+
+  if (milestones.length === 0) {
+    return (
+      <Cd delay={0} hover={false} className="p-8 text-center">
+        <I name="calendar" size={32} color="var(--muted-foreground)" />
+        <div className="text-sm text-muted-foreground mt-3">No milestones defined yet</div>
+        <div className="text-xs text-muted-foreground mt-1">Add milestones in the Overview tab to see them on the timeline</div>
+      </Cd>
+    );
+  }
+
+  /* Timeline math */
+  const parseDate = (d: string) => new Date(d + "T00:00:00").getTime();
+  const allDates = milestones.map(m => parseDate(m.date));
+  const minDate = Math.min(...allDates);
+  const maxDate = Math.max(...allDates);
+  const PAD = 30 * 24 * 60 * 60 * 1000;
+  const timeStart = minDate - PAD;
+  const timeEnd = maxDate + PAD;
+  const timeSpan = timeEnd - timeStart;
+  const BASE_WIDTH = mob ? 800 : 1100;
+  const TIMELINE_WIDTH = BASE_WIDTH * zoom;
+  const TRACK_HEIGHT = 150;
+  const dateToX = (d: string) => ((parseDate(d) - timeStart) / timeSpan) * TIMELINE_WIDTH;
+  const TODAY = new Date();
+  const todayX = ((TODAY.getTime() - timeStart) / timeSpan) * TIMELINE_WIDTH;
+
+  /* Month grid */
+  const months: { label: string; x: number }[] = [];
+  const cursor = new Date(timeStart);
+  cursor.setDate(1); cursor.setMonth(cursor.getMonth() + 1);
+  while (cursor.getTime() < timeEnd) {
+    months.push({ label: cursor.toLocaleDateString("en-US", { month: "short", year: "2-digit" }), x: ((cursor.getTime() - timeStart) / timeSpan) * TIMELINE_WIDTH });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  /* Scroll to today on mount */
+  useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.scrollLeft = Math.max(0, todayX - containerRef.current.clientWidth / 2);
+    }
+  }, [zoom]);
+
+  /* Color for milestone — shadcn-aligned palette */
+  const msColor = (ms: typeof milestones[0]) => {
+    if (ms.status === "done") return '#10b981';
+    if (parseDate(ms.date) < TODAY.getTime()) return '#ef4444';
+    return '#3b82f6';
+  };
+  const msBg = (ms: typeof milestones[0]) => {
+    if (ms.status === "done") return 'rgba(16,185,129,0.12)';
+    if (parseDate(ms.date) < TODAY.getTime()) return 'rgba(239,68,68,0.12)';
+    return 'rgba(59,130,246,0.12)';
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+      {/* Program header */}
+      <Cd delay={0} hover={false} className="p-4 md:p-5 mb-4">
+        <div className="flex items-center gap-2 mb-1">
+          <I name="calendar" size={16} color="var(--foreground)" />
+          <span className="text-sm font-semibold text-foreground">{p.name} — Milestone Timeline</span>
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-foreground">
+            {milestones.filter(m => m.status === 'done').length}/{milestones.length} done
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">Drag to pan, hover milestones for details. Arrow marks today.</p>
+      </Cd>
+
+      {/* Zoom controls */}
+      <div className="flex items-center justify-end gap-1 mb-3">
+        <button onClick={() => setZoom(z => Math.max(0.5, z - 0.25))} className="inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors cursor-pointer text-sm font-medium">−</button>
+        <span className="text-xs text-muted-foreground w-12 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
+        <button onClick={() => setZoom(z => Math.min(3, z + 0.25))} className="inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors cursor-pointer text-sm font-medium">+</button>
+      </div>
+
+      {/* Draggable timeline */}
+      <Cd delay={0.05} hover={false} className="p-0 mb-5 overflow-hidden">
+        <div ref={containerRef} className="overflow-x-auto overflow-y-hidden" style={{ cursor: "grab" }}
+          onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onTouchStart={onTouchStart} onTouchMove={onTouchMove}>
+          <div style={{ width: TIMELINE_WIDTH, height: TRACK_HEIGHT + 60, position: "relative" }}>
+            {/* Month grid */}
+            {months.map((m, i) => (
+              <div key={i} style={{ position: "absolute", left: m.x, top: 0, bottom: 0, width: 1, background: "var(--border)", opacity: 0.5 }}>
+                <span className="text-xs text-muted-foreground font-bold absolute" style={{ top: 4, left: 6, whiteSpace: "nowrap" }}>{m.label}</span>
+              </div>
+            ))}
+            {/* Today — down arrow marker */}
+            <div style={{ position: "absolute", left: todayX, top: 30 + TRACK_HEIGHT / 2 - 28, transform: "translateX(-50%)", zIndex: 15, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pointerEvents: "none" }}>
+              <span className="text-xs font-semibold px-1.5 py-0.5 rounded-md bg-foreground text-background" style={{ whiteSpace: "nowrap" }}>Today</span>
+              <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
+                <path d="M7 10L0 0H14L7 10Z" fill="currentColor" className="text-foreground" />
+              </svg>
+            </div>
+            {/* Track bg */}
+            <div style={{ position: "absolute", left: 0, right: 0, top: 30, bottom: 0, background: "var(--muted)", opacity: 0.3 }} />
+            {/* Track line */}
+            <div style={{ position: "absolute", left: 40, right: 40, top: 30 + TRACK_HEIGHT / 2, height: 1, background: "var(--border)", borderRadius: 1 }} />
+
+            {/* Milestone dots — stagger labels to avoid overlap */}
+            {(() => {
+              const sorted = milestones.map((ms, oi) => ({ ms, oi, x: dateToX(ms.date) })).sort((a, b) => a.x - b.x);
+              const MIN_GAP = 60;
+              const tiers = [-70, -44, 30, 56];
+              const connH = [40, 14, 14, 40];
+              const assigned: number[] = [];
+              sorted.forEach((item, i) => {
+                if (i === 0) { assigned.push(item.ms.status === "done" ? 1 : 2); return; }
+                const gap = item.x - sorted[i - 1].x;
+                if (gap >= MIN_GAP) { assigned.push(item.ms.status === "done" ? 1 : 2); return; }
+                const prev = assigned[i - 1];
+                const candidates = [0, 1, 2, 3].filter(t => t !== prev);
+                const preferred = item.ms.status === "done" ? candidates.find(t => t < 2) ?? candidates[0] : candidates.find(t => t >= 2) ?? candidates[0];
+                assigned.push(preferred);
+              });
+              return sorted.map(({ ms, oi, x }, mi) => {
+                const done = ms.status === "done";
+                const isPast = parseDate(ms.date) < TODAY.getTime();
+                const c = msColor(ms);
+                const tier = tiers[assigned[mi]];
+                const cH = connH[assigned[mi]];
+                const cTop = tier < 0 ? tier + cH : 14;
+                return (
+                  <motion.div key={ms.name + oi} initial={{ scale: 0, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+                    transition={{ delay: 0.1 + mi * 0.04, type: "spring", stiffness: 300, damping: 20 }}
+                    style={{ position: "absolute", left: x, top: 30 + TRACK_HEIGHT / 2, transform: "translate(-50%, -50%)", zIndex: 20 }}
+                    onMouseEnter={(e) => { if (!isDragging) { setHoveredMs(ms); setTooltipPos({ x: e.clientX, y: e.clientY }); } }}
+                    onMouseLeave={() => setHoveredMs(null)}>
+                    <div style={{ position: "absolute", left: "50%", top: cTop, width: 1, height: cH, background: c, opacity: 0.4 }} />
+                    <div className="rounded-full flex items-center justify-center"
+                      style={{ width: done ? 20 : 16, height: done ? 20 : 16, background: done ? c : "var(--card)", border: `2.5px solid ${c}`, boxShadow: done ? `0 0 12px ${c}44` : "none", cursor: "pointer" }}>
+                      {done && <I name="check" size={10} color="var(--background)" />}
+                    </div>
+                    <div className="absolute text-center" style={{ left: "50%", transform: "translateX(-50%)", top: tier, whiteSpace: "nowrap" }}>
+                      <div className="text-xs font-bold" style={{ color: done ? c : "var(--foreground)" }}>{ms.name}</div>
+                      <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        {new Date(ms.date + "T00:00:00").toLocaleDateString("en-US", { month: "short", year: "2-digit" })}
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              });
+            })()}
+          </div>
+        </div>
+      </Cd>
+
+      {/* Tooltip */}
+      <AnimatePresence>
+        {hoveredMs && !isDragging && (
+          <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+            className="fixed z-50 rounded-md shadow-md p-3 max-w-xs bg-popover border border-border"
+            style={{ left: Math.min(tooltipPos.x + 12, window.innerWidth - 280), top: tooltipPos.y - 80, background: "var(--card)" }}>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: msColor(hoveredMs) }} />
+              <span className="text-sm font-semibold text-foreground">{hoveredMs.name}</span>
+              {hoveredMs.status === "done" && (
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium" style={{ background: msBg(hoveredMs), color: msColor(hoveredMs) }}>Done</span>
+              )}
+            </div>
+            <div className="text-xs text-muted-foreground mb-1">
+              {new Date(hoveredMs.date + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+              {hoveredMs.owner && ` · ${hoveredMs.owner}`}
+            </div>
+            {hoveredMs.keyIssue && (
+              <div className="text-xs mt-1 px-2 py-1 rounded-md bg-muted text-foreground">
+                {hoveredMs.keyIssue}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+    </motion.div>
   );
 }

@@ -159,10 +159,10 @@ export function Cd({
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, delay, ease: [0.25, 0.46, 0.45, 0.94] }}
-      whileHover={hover ? { y: -3, boxShadow: '0 0 30px rgba(0,0,0,.04), 0 8px 32px rgba(0,0,0,.08)' } : {}}
+      whileHover={hover && onClick ? { y: -1, boxShadow: '0 1px 3px rgba(0,0,0,.06), 0 2px 6px rgba(0,0,0,.04)' } : {}}
       onClick={onClick}
       className={cn(
-        "rounded-xl border bg-card/90 border-border backdrop-blur-sm",
+        "rounded-2xl border border-border bg-card text-card-foreground shadow-sm",
         classNameProp
       )}
       style={{ cursor: onClick ? "pointer" : "default", ...style }}
